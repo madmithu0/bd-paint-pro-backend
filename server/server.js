@@ -7,8 +7,8 @@ import { attachSocket } from './socketHandler.js';
 const server = http.createServer(app);
 const io = attachSocket(server);
 
-server.listen(env.port, () => {
-  logEvent('info', 'server_started', { details: { port: env.port } });
+server.listen(env.port, '0.0.0.0', () => {
+  logEvent('info', 'server_started', { details: { port: env.port, host: '0.0.0.0' } });
 });
 
 let shuttingDown = false;
