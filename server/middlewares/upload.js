@@ -2,17 +2,15 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 
-// Ensure upload directory exists
 const uploadDir = path.join(__dirname, '../uploads');
 if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir, { recursive: true });
 }
 
-// Storage configuration
 const storage = multer.diskStorage({
   destination: function (req, file, cb) {
     let folder = 'general';
-    
+
     if (file.fieldname === 'avatar' || file.fieldname === 'profileImage') {
       folder = 'profiles';
     } else if (file.fieldname === 'banner' || file.fieldname === 'bannerImage') {
@@ -38,7 +36,6 @@ const storage = multer.diskStorage({
   }
 });
 
-// File filter
 const fileFilter = (req, file, cb) => {
   const allowedTypes = /jpeg|jpg|png|webp|pdf/;
   const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
@@ -51,23 +48,10 @@ const fileFilter = (req, file, cb) => {
   }
 };
 
-// Multer instance
-const upload = multer({
+module.exports = multer({
   storage: storage,
   limits: {
-    fileSize: 5 * 1024 * 1024 // 5MB limit
+    fileSize: 5 * 1024 * 1024
   },
   fileFilter: fileFilter
 });
-
-// Different upload types
-const uploadSingle = (fieldName) => upload.single(fieldName);
-const uploadMultiple = (fieldName, maxCount = 5) => upload.array(fieldName, maxCount);
-const uploadFields = (fields) => upload.fields(fields);
-
-module.exports = {
-  upload,
-  uploadSingle,
-  uploadMultiple,
-  uploadFields
-};

@@ -1,4 +1,4 @@
-import mongoose from 'mongoose';
+const mongoose = require('mongoose');
 const MistriSchema = new mongoose.Schema({
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
   skills: [String],
@@ -7,4 +7,4 @@ const MistriSchema = new mongoose.Schema({
   isAvailable: { type: Boolean, default: true },
   location: { lat: Number, lng: Number }
 }, { timestamps: true });
-export default mongoose.model('Mistri', MistriSchema);
+module.exports = mongoose.model('Mistri', MistriSchema);

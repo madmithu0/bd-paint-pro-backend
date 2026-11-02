@@ -1,5 +1,5 @@
-import mongoose from 'mongoose';
-import crypto from 'crypto';
+const mongoose = require('mongoose');
+const crypto = require('crypto');
 
 const UserSchema = new mongoose.Schema({
   userId: { type: String, unique: true },
@@ -26,4 +26,4 @@ UserSchema.methods.encryptData = function(data) {
   return iv.toString('hex') + ':' + enc;
 };
 
-export default mongoose.model('User', UserSchema);
+module.exports = mongoose.model('User', UserSchema);

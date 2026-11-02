@@ -1,4 +1,4 @@
-import mongoose from 'mongoose';
+const mongoose = require('mongoose');
 const JobSchema = new mongoose.Schema({
   jobId: { type: String, unique: true },
   customerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
@@ -13,4 +13,4 @@ const JobSchema = new mongoose.Schema({
   auditLog: [{ action: String, by: String, at: Date }],
   qualityCheck: { passed: Boolean, checkedBy: String }
 }, { timestamps: true });
-export default mongoose.model('Job', JobSchema);
+module.exports = mongoose.model('Job', JobSchema);

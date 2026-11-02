@@ -1,4 +1,4 @@
-import mongoose from 'mongoose';
+const mongoose = require('mongoose');
 const InventorySchema = new mongoose.Schema({
   itemName: String,
   quantity: Number,
@@ -6,4 +6,4 @@ const InventorySchema = new mongoose.Schema({
   price: Number,
   agentId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }
 }, { timestamps: true });
-export default mongoose.model('Inventory', InventorySchema);
+module.exports = mongoose.model('Inventory', InventorySchema);

@@ -1,8 +1,12 @@
-import express from 'express';
-import jwt from 'jsonwebtoken';
+const express = require('express');
+const { register, login, getMe, logout } = require('../controllers/authController');
+const { protect } = require('../middlewares/auth');
+
 const router = express.Router();
-router.post('/login', async (req,res)=>{
-  const token = jwt.sign({role:'agent'}, process.env.JWT_SECRET);
-  res.json({token, face:'required', voice:'required', phone:'BTRC verified'});
-});
-export default router;
+
+router.post('/register', register);
+router.post('/login', login);
+router.post('/logout', logout);
+router.get('/me', protect, getMe);
+
+module.exports = router;
