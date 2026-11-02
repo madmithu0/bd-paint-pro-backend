@@ -2,7 +2,7 @@ import { env } from './env.js';
 
 export const corsOptions = {
   origin(origin, callback) {
-    if (!origin || env.allowedOrigins.includes(origin)) {
+    if (!origin || env.allowedOrigins.includes('*') || env.allowedOrigins.includes(origin)) {
       return callback(null, true);
     }
     return callback(null, false);
