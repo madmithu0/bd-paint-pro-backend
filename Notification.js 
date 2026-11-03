@@ -1,0 +1,107 @@
+const mongoose = require('mongoose');
+
+// ==========================================
+// ১. নোটিফিকেশন স্কিমা (Notification Schema) ডিজাইন
+// ==========================================
+const notificationSchema = new mongoose.Schema({
+    userId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User',
+        required: true
+    },
+    title: {
+        type: String,
+        required: true,
+        trim: true
+    },
+    message: {
+        type: String,
+        required: true
+    },
+
+    // SMS BTRC masking: বিটিআরসি অনুমোদিত মাস্কিং এসএমএস ট্র্যাকিং
+    smsChannel: {
+        phoneNumber: { type: String, trim: true },
+        maskingName: { type: String, default: null }, // যেমন: NBR, COMPANY_NAME (BTRC approved)
+        deliveryStatus: { type: String, enum: ['Pending', 'Sent', 'Failed', 'None'], default: 'None' },
+        btrcReferenceId: { type: String, default: null } // বিটিআরসি কমপ্লায়েন্স ট্র্যাকিং আইডি
+    },
+
+    // email push: ইমেইল এবং অ্যাপ পুশ নোটিফিকেশন ট্র্যাকিং
+    channels: {
+        email: {
+            recipientEmail: { type: String, trim: true },
+            isSent: { type: Boolean, default: false },
+            sentAt: { type: Date }
+        },
+        appPush: {
+            deviceToken: { type: String, default: null },
+            isDelivered: { type: Boolean, default: false },
+            clicked: { type: Boolean, default: false }
+        }
+    },
+
+    // OTP 3try: ৩ বার ভুল ওটিপি সাবমিশনের সিকিউরিটি ও ভ্যালিডেশন লক
+    otpVerification: {
+        otpCode: { type: String, default: null }, // এনক্রিপ্টেড বা হ্যাশ করা ওটিপি কোড হওয়া শ্রেয়
+        expiresAt: { type: Date },
+        attempts: { type: Number, default: 0, max: 3 }, // সর্বোচ্চ ৩ বার ট্রাই
+        isVerified: { type: Boolean, default: false },
+        isLocked: { type: Boolean, default: false }
+    },
+
+    // 5year log: ৫ বছর পর এই নোটিফিকেশন লগ স্বয়ংক্রিয়ভাবে ডিলিট হওয়ার TTL ইনডেক্স
+    createdAt: {
+        type: Date,
+        default: Date.now,
+        index: { expires: '5y' } // ৫ বছর (5 years) পূর্ণ হলে মঙ্গোডিবি থেকে অটো রিমুভ হবে
+    }
+}, {
+    timestamps: { createdAt: false, updatedAt: true }
+});
+
+// ==========================================
+// ২. মেথড এবং মিডলওয়্যার (Technical Fault & Gap Free)
+// ==========================================
+
+// ওটিপি কোড মেলানোর এবং ৩ বার চেষ্টার লজিক মেথড
+notificationSchema.methods.verifyOTP = async function (enteredCode) {
+    // ওটিপি লকড বা ইতিমধ্যে ভেরিফাইড কিনা চেক
+    if (this.otpVerification.isLocked) {
+        throw new Error('OTP verification is locked due to 3 failed attempts.');
+    }
+    if (this.otpVerification.isVerified) {
+        throw new Error('OTP has already been verified.');
+    }
+    // ওটিপির মেয়াদ শেষ কিনা চেক
+    if (this.otpVerification.expiresAt < Date.now()) {
+        throw new Error('OTP code has expired.');
+    }
+
+    // কোড মিলল কিনা যাচাই
+    if (this.otpVerification.otpCode === enteredCode) {
+        this.otpVerification.isVerified = true;
+        this.otpVerification.attempts = 0; // সফল হলে রিসেট
+        return this.save();
+    } else {
+        // ভুল কোড হলে অ্যাটেম্পট ১ বাড়ানো
+        this.otpVerification.attempts += 1;
+        
+        // ৩ বার ভুল হলে ওটিপি লক করে দেওয়া (OTP 3try)
+        if (this.otpVerification.attempts >= 3) {
+            this.otpVerification.isLocked = true;
+            await this.save();
+            throw new Error('Incorrect OTP. Maximum 3 attempts reached. Verification locked.');
+        }
+        
+        await this.save();
+        throw new Error(`Incorrect OTP code. ${3 - this.otpVerification.attempts} attempts remaining.`);
+    }
+};
+
+// ==========================================
+// ৩. মডেল এক্সপোর্ট
+// ==========================================
+const Notification = mongoose.model('Notification', notificationSchema);
+
+module.exports = Notification;
