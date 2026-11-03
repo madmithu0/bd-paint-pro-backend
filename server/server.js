@@ -1,51 +1,96 @@
-const express = require('express');
-const dotenv = require('dotenv');
-const cors = require('cors');
+require('dotenv').config();
+const http = require('http');
 const mongoose = require('mongoose');
-const path = require('path');
-const { errorHandler, notFound } = require('./middlewares/errorHandler');
+const { Server } = require('socket.io');
+const app = require('./app');
 
-dotenv.config();
+const PORT = process.env.PORT || 3000;
+const MONGO_URI = process.env.MONGODB_URI;
+const FRONTEND_URL = process.env.FRONTEND_URL || "*";
 
-const app = express();
+if (!MONGO_URI) {
+  console.error("FATAL: MONGODB_URI not defined");
+  process.exit(1);
+}
 
-app.use(cors());
-app.use(express.json());
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+const server = http.createServer(app);
 
-app.get('/api/health', (req, res) => {
-  const connected = mongoose.connection.readyState === 1;
-  res.status(connected ? 200 : 503).json({
-    status: 'BD Paint Pro Backend Running',
-    database: connected ? 'up' : 'down',
-    uptimeSeconds: Math.round(process.uptime()),
-    timestamp: new Date().toISOString(),
+const io = new Server(server, {
+  cors: {
+    origin: FRONTEND_URL,
+    methods: ["GET", "POST", "PUT", "DELETE", "PATCH"],
+    credentials: true
+  }
+});
+
+global.io = io;
+
+io.on('connection', (socket) => {
+  socket.on('disconnect', () => {});
+});
+
+let isConnecting = false;
+async function connectDB() {
+  if (isConnecting) return;
+  isConnecting = true;
+  try {
+    await mongoose.connect(MONGO_URI);
+    isConnecting = false;
+  } catch (err) {
+    isConnecting = false;
+    setTimeout(connectDB, 5000);
+  }
+}
+
+mongoose.connection.on('connected', () => {
+  console.log('MongoDB connected');
+});
+
+mongoose.connection.on('disconnected', () => {
+  connectDB();
+});
+
+mongoose.connection.on('error', () => {
+  setTimeout(connectDB, 5000);
+});
+
+function startHealthCheck() {
+  setInterval(async () => {
+    if (mongoose.connection.readyState !== 1) {
+      await connectDB();
+      return;
+    }
+    try {
+      await mongoose.connection.db.admin().ping();
+    } catch {
+      await connectDB();
+    }
+  }, 2000);
+}
+
+function gracefulShutdown(signal) {
+  server.close(() => {
+    mongoose.connection.close(false, () => {
+      process.exit(0);
+    });
   });
+  setTimeout(() => process.exit(1), 10000);
+}
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+process.on('unhandledRejection', (err) => {
+  console.error('Unhandled Rejection:', err.message);
+});
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught Exception:', err.message);
+  gracefulShutdown('uncaughtException');
 });
 
-app.use('/api/auth', require('./routes/authRoutes'));
-app.use('/api/customers', require('./routes/customerRoutes'));
-app.use('/api/mistris', require('./routes/mistriRoutes'));
-app.use('/api/services', require('./routes/serviceRoutes'));
-app.use('/api/jobs', require('./routes/jobRoutes'));
-app.use('/api/transactions', require('./routes/transactionRoutes'));
-app.use('/api/dashboard', require('./routes/dashboardRoutes'));
-app.use('/api/materials', require('./routes/materialRoutes'));
-app.use('/api/banners', require('./routes/bannerRoutes'));
-app.use('/api/settings', require('./routes/settingsRoutes'));
-
-app.get('/', (req, res) => {
-  res.send('BD Paint Pro API is Running...');
-});
-
-app.use(notFound);
-app.use(errorHandler);
-
-const PORT = Number(process.env.PORT) || 5000;
-
-app.listen(PORT, '0.0.0.0', () => console.log(`Server running on port ${PORT}`));
-
-mongoose
-  .connect(process.env.MONGODB_URI)
-  .then(() => console.log('MongoDB connected'))
-  .catch((err) => console.error('MongoDB connection failed:', err.message));
+(async () => {
+  await connectDB();
+  startHealthCheck();
+  server.listen(PORT, () => {
+    console.log(`Server running on ${PORT}`);
+  });
+})();
