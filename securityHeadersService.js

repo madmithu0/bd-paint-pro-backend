@@ -1,0 +1,69 @@
+const helmet = require('helmet');
+
+// ১. সিকিউরিটি হেডার মিডলওয়্যার কনফিগারেশন
+const securityHeadersMiddleware = [
+    // Helmet এর মাধ্যমে HSTS, CSP, XSS block, noSniff এবং অন্যান্য সিকিউরিটি হেডার সেট করা
+    helmet({
+        // Content Security Policy (CSP): আনঅথরাইজড স্ক্রিপ্ট বা সোর্স ব্লক করে XSS প্রতিরোধ করে
+        contentSecurityPolicy: {
+            directives: {
+                defaultSrc: ["'self'"],
+                scriptSrc: ["'self'", "'trusted-cdn.com'"], // আপনার প্রয়োজনীয় বিশ্বস্ত CDN এখানে দিন
+                styleSrc: ["'self'", "'unsafe-inline'"],
+                imgSrc: ["'self'", "data:"],
+                connectSrc: ["'self'"],
+                upgradeInsecureRequests: [], // HTTP রিকোয়েস্টকে অটো HTTPS এ কনভার্ট করবে
+            },
+        },
+        // HTTP Strict Transport Security (HSTS): ব্রাউজারকে বাধ্য করবে শুধু HTTPS ব্যবহার করতে
+        strictTransportSecurity: {
+            maxAge: 31536000, // ১ বছর (সেকেন্ডে)
+            includeSubDomains: true, // সাবডোমেনসহ সিকিউর করবে
+            preload: true,
+        },
+        // X-Content-Type-Options: mime-type স্নীফিং ব্লক করে (noSniff)
+        noSniff: true,
+        // X-Frame-Options: Clickjacking প্রতিরোধ করে
+        frameguard: { action: 'deny' },
+        // X-XSS-Protection: মডার্ন ব্রাউজারে XSS ফিল্টার এনাবল করে
+        xXssProtection: true,
+    }),
+
+    // ২. সাধারণ SQL Injection (SQLi) ফিল্টার মিডলওয়্যার
+    (req, res, next) => {
+        const sqlRegex = /UNION|SELECT|INSERT|UPDATE|DELETE|DROP|--|\/\*/i;
+        
+        // রিকোয়েস্টের বডি, কুয়েরি বা প্যারামিটারে কোনো SQL কোড আছে কিনা চেক করা
+        const hasSqlInjection = (obj) => {
+            if (!obj) return false;
+            const str = typeof obj === 'string' ? obj : JSON.stringify(obj);
+            return sqlRegex.test(str);
+        };
+
+        if (hasSqlInjection(req.body) || hasSqlInjection(req.query) || hasSqlInjection(req.params)) {
+            return res.status(403).json({
+                success: false,
+                message: "অনুমতিহীন কার্যকলাপ সনাক্ত করা হয়েছে। (SQLi Blocked)"
+            });
+        }
+        next();
+    },
+
+    // ৩. বট এবং স্ক্র্যাপার সনাক্তকরণ (Bot Detection) মিডলওয়্যার
+    (req, res, next) => {
+        const userAgent = req.headers['user-agent'] || '';
+        
+        // সাধারণ ক্ষতিকারক বট এবং স্ক্র্যাপারদের তালিকা
+        const botRegex = /wget|curl|python|scrapy|spider|crawl|headless|selenium|puppeteer/i;
+
+        if (botRegex.test(userAgent)) {
+            return res.status(403).json({
+                success: false,
+                message: "বট বা অটোমেটেড স্ক্রিপ্টের মাধ্যমে অ্যাক্সেস নিষিদ্ধ।"
+            });
+        }
+        next();
+    }
+];
+
+module.exports = securityHeadersMiddleware;
