@@ -1,0 +1,87 @@
+// এই কোডটি চালানোর আগে প্রজেক্টে 'xss-clean' এবং 'hpp' প্যাকেজ ইনস্টল থাকতে হবে
+const xss = require('xss-clean');
+const hpp = require('hpp');
+
+// ১. গালিগালাজ ফিল্টার করার তালিকা (Galigali Filter - DSA Compliance)
+const offensiveWords = ['bal', 'buda', 'khanki', 'shala', 'magi', 'gandu', 'choda']; // আপনার প্রয়োজন অনুযায়ী শব্দ যোগ করতে পারেন
+
+const filterBadWords = (text) => {
+    if (typeof text !== 'string') return text;
+    let sanitizedText = text;
+    offensiveWords.forEach(word => {
+        const regex = new RegExp(`\\b${word}\\b`, 'gi');
+        sanitizedText = sanitizedText.replace(regex, '***');
+    });
+    return sanitizedText;
+};
+
+// ২. ইনপুট স্যানিটাইজেশন মিডলওয়্যার
+const inputSanitizeMiddleware = [
+    // XSS Clean: রিকোয়েস্ট বডি, কুয়েরি এবং প্যারামস থেকে ক্ষতিকারক HTML/Script ট্যাগ রিমুভ করে
+    xss(),
+
+    // HPP: HTTP প্যারামিটার পলিউশন প্রতিরোধ করে (যেমন: ?user=abc&user=xyz ক্লায়েন্টকে অ্যারে দেওয়া বন্ধ করে)
+    hpp(),
+
+    // কাস্টম ফিল্টার: SQLi, PHP Shell, MIME এবং গালিগালাজ ফিল্টার
+    (req, res, next) => {
+        // SQL Injection এবং PHP Shell ব্লকিং রেগুলার এক্সপ্রেশন
+        const sqlRegex = /UNION|SELECT|INSERT|UPDATE|DELETE|DROP|--|\/\*/i;
+        const phpShellRegex = /<\?php|\.php|eval\(|exec\(|passthru\(/i;
+
+        const checkAndSanitize = (obj) => {
+            if (!obj) return false;
+
+            for (let key in obj) {
+                if (typeof obj[key] === 'object') {
+                    if (checkAndSanitize(obj[key])) return true;
+                } else if (typeof obj[key] === 'string') {
+                    // SQL Injection এবং PHP Shell স্ক্রিপ্ট চেক
+                    if (sqlRegex.test(obj[key]) || phpShellRegex.test(obj[key])) {
+                        return true;
+                    }
+                    // গালিগালাজ বা অবজেকশনেবল টেক্সট ফিল্টার
+                    obj[key] = filterBadWords(obj[key]);
+                }
+            }
+            return false;
+        };
+
+        // বডি, কুয়েরি এবং প্যারামিটার চেক
+        if (checkAndSanitize(req.body) || checkAndSanitize(req.query) || checkAndSanitize(req.params)) {
+            return res.status(400).json({
+                success: false,
+                message: "অনুমতিহীন ডাটা বা ক্ষতিকারক কোড সনাক্ত করা হয়েছে।"
+            });
+        }
+
+        // ৩. ফাইল আপলোডের ক্ষেত্রে MIME Type এবং PHP Shell এক্সটেনশন চেক
+        if (req.files || req.file) {
+            const files = req.files ? (Array.isArray(req.files) ? req.files : Object.values(req.files).flat()) : [req.file];
+            
+            // অনুমোদিত ফাইল টাইপ সমূহের তালিকা (প্রয়োজন অনুযায়ী পরিবর্তন করতে পারেন)
+            const allowedMimeTypes = ['image/jpeg', 'image/png', 'image/gif', 'application/pdf'];
+
+            for (const file of files) {
+                // MIME টাইপ চেক
+                if (!allowedMimeTypes.includes(file.mimetype)) {
+                    return res.status(400).json({
+                        success: false,
+                        message: "অমান্য ফাইল টাইপ! শুধুমাত্র JPG, PNG, GIF এবং PDF অনুমোদিত।"
+                    });
+                }
+                // ফাইল নেমে PHP এক্সটেনশন বা শেল কোড আছে কিনা চেক
+                if (phpShellRegex.test(file.originalname)) {
+                    return res.status(400).json({
+                        success: false,
+                        message: "ক্ষতিকারক ফাইল এক্সটেনশন সনাক্ত করা হয়েছে।"
+                    });
+                }
+            }
+        }
+
+        next();
+    }
+];
+
+module.exports = inputSanitizeMiddleware;
