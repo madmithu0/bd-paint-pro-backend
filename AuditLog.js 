@@ -1,0 +1,77 @@
+const mongoose = require('mongoose');
+
+// ==========================================
+// ১. অডিট লগ স্কিমা (AuditLog Schema) ডিজাইন
+// ==========================================
+const auditLogSchema = new mongoose.Schema({
+    action: {
+        type: String,
+        required: true,
+        trim: true // যেমন: 'PAYMENT_SUCCESS', 'USER_LOGIN_FAILED'
+    },
+    performedBy: {
+        type: String,
+        required: true // ব্যবহারকারী বা সিস্টেমের আইডি/ইমেইল
+    },
+    ipAddress: {
+        type: String,
+        required: true
+    },
+    details: {
+        type: mongoose.Schema.Types.Mixed,
+        required: true // যেকোনো ডাইনামিক অবজেক্ট বা মেসেজ সেভ করার জন্য
+    },
+
+    // blockchainHash: ডাটার সত্যতা ও অপরিবর্তনশীলতা নিশ্চিত করার হ্যাশ লিংক
+    blockchainHash: {
+        type: String,
+        required: true,
+        trim: true
+    },
+    previousLogHash: {
+        type: String,
+        required: true // চেইনিং বা ব্লকচেইন মেকানিজমের জন্য পূর্ববর্তী লগের হ্যাশ
+    },
+
+    // 5year: ৫ বছর পর এই লগ ফাইল স্বয়ংক্রিয়ভাবে মুছে যাওয়ার জন্য TTL (Time To Live) ইনডেক্স
+    createdAt: {
+        type: Date,
+        default: Date.now,
+        index: { expires: '5y' } // ৫ বছর পূর্ণ হলে মঙ্গোডিবি থেকে অটো ডিলিট হবে
+    }
+}, {
+    timestamps: { createdAt: false, updatedAt: false }, // কোনো মডিফিকেশন টাইম ট্র্যাকিং প্রয়োজন নেই
+    versionKey: false // অডিট লগে ডকুমেন্ট ভার্সনিং (__v) বন্ধ রাখার জন্য
+});
+
+// ==========================================
+// ২. ইমিউটেবল ও সিকিউরিটি মিডলওয়্যার (noDelete noUpdate)
+// ==========================================
+
+// কোনোভাবেই ডাটা আপডেট (Update) করা যাবে না
+const preventUpdate = function (next) {
+    next(new Error('Audit logs are strictly immutable. Updates are not allowed.'));
+};
+
+auditLogSchema.pre('updateOne', preventUpdate);
+auditLogSchema.pre('updateMany', preventUpdate);
+auditLogSchema.pre('findOneAndUpdate', preventUpdate);
+auditLogSchema.pre('findByIdAndUpdate', preventUpdate);
+
+// কোনোভাবেই ডাটা ডিলিট (Delete) করা যাবে না
+const preventDelete = function (next) {
+    next(new Error('Audit logs are protected. Manual deletion is forbidden.'));
+};
+
+auditLogSchema.pre('deleteOne', preventDelete);
+auditLogSchema.pre('deleteMany', preventDelete);
+auditLogSchema.pre('findOneAndDelete', preventDelete);
+auditLogSchema.pre('findByIdAndDelete', preventDelete);
+auditLogSchema.pre('remove', preventDelete);
+
+// ==========================================
+// ৩. মডেল এক্সপোর্ট
+// ==========================================
+const AuditLog = mongoose.model('AuditLog', auditLogSchema);
+
+module.exports = AuditLog;
