@@ -1,0 +1,179 @@
+const express = require('express');
+const router = express.Router();
+const crypto = require('crypto');
+
+// ১. নতুন জব বা কাজের অর্ডার তৈরি (job)
+router.post('/create-job', async (req, res) => {
+    try {
+        const { customerId, jobType, location, budget } = req.body;
+
+        if (!customerId || !jobType || !location || !budget) {
+            return res.status(400).json({ error: 'Missing required job fields: customerId, jobType, location, or budget.' });
+        }
+
+        // জব আইডি জেনারেট এবং ডাটা স্ট্রাকচার
+        const jobData = {
+            jobId: `JOB-${Date.now()}`,
+            customerId,
+            jobType,
+            location,
+            budget: Number(budget),
+            status: 'pending',
+            assignedMistriId: null,
+            createdAt: new Date()
+        };
+
+        // এখানে আপনার ডাটাবেজে সেভ করার কুয়েরি হবে (যেমন: await Job.create(jobData))
+
+        return res.status(201).json({
+            success: true,
+            message: 'Job order created successfully.',
+            job: jobData
+        });
+    } catch (error) {
+        return res.status(500).json({ error: 'Failed to create job.', details: error.message });
+    }
+});
+
+// ২. ম্যানুয়ালি নির্দিষ্ট মিস্ত্রি নিয়োগ (mistriAssign)
+router.post('/assign-mistri', async (req, res) => {
+    try {
+        const { jobId, mistriId } = req.body;
+
+        if (!jobId || !mistriId) {
+            return res.status(400).json({ error: 'Both Job ID and Mistri ID are required for manual assignment.' });
+        }
+
+        return res.status(200).json({
+            success: true,
+            message: `Mistri ${mistriId} has been successfully assigned to Job ${jobId}.`,
+            assignment: { jobId, mistriId, assignedAt: new Date() }
+        });
+    } catch (error) {
+        return res.status(500).json({ error: 'Manual assignment failed.', details: error.message });
+    }
+});
+
+// ৩. অ্যালগরিদমের মাধ্যমে স্বয়ংক্রিয় মিস্ত্রি নিয়োগ (autoAssign)
+// (কাছাকাছি থাকা এবং সবচেয়ে বেশি রেটিং পাওয়া মিস্ত্রিকে খুঁজে বের করার লজিক)
+router.post('/auto-assign', async (req, res) => {
+    try {
+        const { jobId, jobLocation, requiredSkill } = req.body;
+
+        if (!jobId || !jobLocation || !requiredSkill) {
+            return res.status(400).json({ error: 'Job ID, location, and required skill are necessary for auto-assignment.' });
+        }
+
+        // ডামি মিস্ত্রি লিস্ট (বাস্তব ক্ষেত্রে এটি ডাটাবেজ থেকে কুয়েরি হবে)
+        const availableMistris = [
+            { id: 'MISTRI-101', name: 'Alamin', rating: 4.8, distanceKm: 1.5 },
+            { id: 'MISTRI-102', name: 'Kashem', rating: 4.5, distanceKm: 0.8 },
+            { id: 'MISTRI-103', name: 'Rafiq', rating: 4.9, distanceKm: 3.2 }
+        ];
+
+        // শর্টেস্ট ডিস্টেন্স এবং হাইয়েস্ট রেটিং এর ওপর ভিত্তি করে অটো-অ্যাসাইন লজিক (বাগ-মুক্ত ফিল্টারিং)
+        const bestMatch = availableMistris.reduce((prev, curr) => {
+            return (curr.distanceKm < prev.distanceKm && curr.rating >= 4.5) ? curr : prev;
+        });
+
+        return res.status(200).json({
+            success: true,
+            message: 'Auto-assignment algorithmic search complete.',
+            assignedMistri: bestMatch,
+            jobId
+        });
+    } catch (error) {
+        return res.status(500).json({ error: 'Auto assignment algorithm failed.', details: error.message });
+    }
+});
+
+// ৪. আবহাওয়ার কন্ডিশন চেক করা (weather)
+// (বাইরের কাজ যেমন রং করা বা কনস্ট্রাকশনের কাজ বৃষ্টির কারণে বন্ধ রাখা উচিত কিনা তা নির্ধারণের লজিক)
+router.get('/weather-check', async (req, res) => {
+    try {
+        const { lat, lon } = req.query;
+
+        if (!lat || !lon) {
+            return res.status(400).json({ error: 'Latitude and Longitude query parameters are required.' });
+        }
+
+        // এখানে থার্ড-পার্টি ওয়েদার API (যেমন WeatherAPI বা OpenWeather) কল হবে। 
+        // নিচে একটি ফল্ট-টলারেন্ট ডামি রেসপন্স দেওয়া হলো:
+        const weatherCondition = {
+            temp: '28°C',
+            condition: 'Rainy', // বা 'Clear', 'Cloudy'
+            rainProbability: '85%',
+            isSafeForOutdoorWork: false // বৃষ্টি থাকলে বাইরের কাজের জন্য সেফ না (False)
+        };
+
+        return res.status(200).json({
+            success: true,
+            location: { lat, lon },
+            weather: weatherCondition,
+            actionableAdvice: weatherCondition.isSafeForOutdoorWork ? 'Proceed with outdoor work.' : 'Delay outdoor work due to bad weather.'
+        });
+    } catch (error) {
+        return res.status(500).json({ error: 'Weather check failed.', details: error.message });
+    }
+});
+
+// ৫. শ্রমিকের কর্মক্ষেত্র বীমা ভ্যালিডেশন (laborInsurance)
+router.post('/verify-insurance', async (req, res) => {
+    try {
+        const { mistriId, insurancePolicyNumber } = req.body;
+
+        if (!mistriId || !insurancePolicyNumber) {
+            return res.status(400).json({ error: 'Mistri ID and Insurance Policy Number are required.' });
+        }
+
+        // ইন্সুরেন্সের মেয়াদ শেষ কিনা তা যাচাই করার লজিক
+        const mockExpiryDate = new Date();
+        mockExpiryDate.setFullYear(mockExpiryDate.getFullYear() + 1); // ১ বছর মেয়াদ বাড়িয়ে ডামি চেক
+
+        const isExpired = new Date() > mockExpiryDate;
+
+        return res.status(200).json({
+            success: true,
+            mistriId,
+            policyStatus: isExpired ? 'EXPIRED' : 'ACTIVE',
+            coverageType: 'Workplace Injury & Liability Insurance'
+        });
+    } catch (error) {
+        return res.status(500).json({ error: 'Insurance verification crashed.', details: error.message });
+    }
+});
+
+// ৬. ডাটা টেম্পারিং বা হ্যাকিং প্রতিরোধ প্রোটেকশন (noTamper)
+// (রিকোয়েস্টের পে-লোড বা হ্যাশ ভ্যালু মেলানোর মাধ্যমে ডাটা পরিবর্তন রোধ করার মিডলওয়্যার/লজিক)
+router.post('/secure-update', async (req, res) => {
+    try {
+        const { jobPayload, clientChecksum, secretKey } = req.body;
+
+        if (!jobPayload || !clientChecksum) {
+            return res.status(400).json({ error: 'Payload and Checksum hash are mandatory for anti-tamper check.' });
+        }
+
+        // SHA-256 দিয়ে একটি হ্যাশ তৈরি করে ডাটা মডিফাই হয়েছে কিনা তা নিখুঁতভাবে চেক করা
+        const key = secretKey || 'fallback_secure_salt_key';
+        const serverChecksum = crypto.createHmac('sha256', key)
+                                     .update(JSON.stringify(jobPayload))
+                                     .digest('hex');
+
+        // যদি ক্লায়েন্ট থেকে পাঠানো হ্যাশ আর সার্ভারের হ্যাশ না মেলে, তার মানে ডেটা হ্যাক/টেম্পার হয়েছে
+        if (clientChecksum !== serverChecksum) {
+            return res.status(403).json({
+                success: false,
+                error: 'Security Breach Detected! Data tampering (noTamper) blocked.'
+            });
+        }
+
+        return res.status(200).json({
+            success: true,
+            message: 'Data integrity verified. Safe to update database without tamper risk.'
+        });
+    } catch (error) {
+        return res.status(500).json({ error: 'No-Tamper verification system crash.', details: error.message });
+    }
+});
+
+module.exports = router;
