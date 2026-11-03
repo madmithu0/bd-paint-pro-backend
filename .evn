@@ -1,0 +1,48 @@
+require('dotenv').config();
+
+const validateEnv = () => {
+    const requiredEnvs = [
+        'BIN_NUMBER',
+        'BTRC_MASKING_ID',
+        'DPA_CONFIG_KEY',
+        'LABOR_API_KEY',
+        'FACE_VOICE_API_KEY',
+        'MONGO_URI',
+        'JWT_SECRET',
+        'ALLOWED_IPS'
+    ];
+
+    const missingEnvs = requiredEnvs.filter(key => !process.env[key]);
+    if (missingEnvs.length > 0) {
+        throw new Error(`Technical Fault: Missing environment variables: ${missingEnvs.join(', ')}`);
+    }
+
+    const mongoUri = process.env.MONGO_URI;
+    try {
+        const urlParser = new URL(mongoUri);
+        const password = decodeURIComponent(urlParser.password);
+        if (!password || password.length !== 32) {
+            throw new Error("Security Alert: MongoDB password inside MONGO_URI must be exactly 32 characters long.");
+        }
+    } catch (e) {
+        throw new Error(`Technical Fault: Invalid MONGO_URI configuration. ${e.message}`);
+    }
+
+    const jwtSecret = process.env.JWT_SECRET;
+    if (jwtSecret.length !== 64) {
+        throw new Error("Security Alert: JWT_SECRET must be exactly 64 characters long.");
+    }
+
+    return {
+        bin: process.env.BIN_NUMBER,
+        btrc: process.env.BTRC_MASKING_ID,
+        dpa: process.env.DPA_CONFIG_KEY,
+        labor: process.env.LABOR_API_KEY,
+        biometric: process.env.FACE_VOICE_API_KEY,
+        mongo: mongoUri,
+        jwt: jwtSecret,
+        ipWhitelist: process.env.ALLOWED_IPS.split(',')
+    };
+};
+
+module.exports = validateEnv();
