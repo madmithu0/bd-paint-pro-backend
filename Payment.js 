@@ -1,0 +1,93 @@
+const mongoose = require('mongoose');
+
+// ==========================================
+// ১. পেমেন্ট স্কিমা (Payment Schema) ডিজাইন
+// ==========================================
+const paymentSchema = new mongoose.Schema({
+    transactionId: {
+        type: String,
+        required: true,
+        unique: true,
+        trim: true
+    },
+    totalAmount: {
+        type: Number,
+        required: true,
+        min: 0
+    },
+
+    // profit conditional agent 80/5/15 else 80/20
+    profitDistribution: {
+        hasAgent: { type: Boolean, default: false },
+        agentId: { type: mongoose.Schema.Types.ObjectId, ref: 'Agent', default: null },
+        companyShare: { type: Number, default: 0 },   // ৮০% (ফিক্সড)
+        agentShare: { type: Number, default: 0 },     // ৫% অথবা ০%
+        vendorShare: { type: Number, default: 0 }     // ১৫% অথবা ২০%
+    },
+
+    // Mushak 6.3 VAT 15% BIN
+    mushakVat: {
+        binNumber: { type: String, required: true }, // Business Identification Number (BIN)
+        mushakChallanNo: { type: String, required: true }, // মূসক-৬.৩ চালান নম্বর
+        vatPercentage: { type: Number, default: 15 }, // ১৫% ভ্যাট
+        vatAmount: { type: Number, default: 0 }
+    },
+
+    // bank encrypted: এনক্রিপ্টেড ব্যাংক অ্যাকাউন্ট ইনফরমেশন
+    bankDetails: {
+        encryptedData: { type: String, required: true },
+        iv: { type: String, required: true }
+    },
+
+    // signatureVerified: ডিজিটাল সিগনেচার ভেরিফিকেশন স্ট্যাটাস
+    security: {
+        digitalSignature: { type: String, required: true },
+        isSignatureVerified: { type: Boolean, default: false }
+    }
+}, {
+    timestamps: true
+});
+
+// ==========================================
+// ২. মেথড এবং মিডলওয়্যার (Technical Fault & Gap Free)
+// ==========================================
+
+// লাভ এবং ভ্যাট বন্টন হিসাব করার প্রি-সেভ (pre-save) মিডলওয়্যার
+paymentSchema.pre('save', function (next) {
+    // ১. মূসক ১৫% ভ্যাট হিসাব (Mushak 6.3 VAT 15%)
+    this.mushakVat.vatAmount = (this.totalAmount * this.mushakVat.vatPercentage) / 100;
+    
+    // ভ্যাট বাদে মূল লাভের টাকা
+    const netProfit = this.totalAmount - this.mushakVat.vatAmount;
+
+    // ২. প্রফিট কন্ডিশনাল এজেন্ট ডিস্ট্রিবিউশন হিসাব (80/5/15 else 80/20)
+    if (this.profitDistribution.hasAgent && this.profitDistribution.agentId) {
+        // এজেন্ট থাকলে: ৮০% কোম্পানি, ৫% এজেন্ট, ১৫% ভেন্ডর
+        this.profitDistribution.companyShare = (netProfit * 80) / 100;
+        this.profitDistribution.agentShare = (netProfit * 5) / 100;
+        this.profitDistribution.vendorShare = (netProfit * 15) / 100;
+    } else {
+        // এজেন্ট না থাকলে: ৮০% কোম্পানি, ২০% ভেন্ডর (agentShare = 0)
+        this.profitDistribution.companyShare = (netProfit * 80) / 100;
+        this.profitDistribution.agentShare = 0;
+        this.profitDistribution.vendorShare = (netProfit * 20) / 100;
+    }
+
+    next();
+});
+
+// immutable: ডেটাবেজে একবার পেমেন্ট সেভ হয়ে গেলে তা আর পরিবর্তন (Update) করা যাবে না
+paymentSchema.pre('updateOne', function (next) {
+    next(new Error('Payment data is immutable and cannot be modified.'));
+});
+
+paymentSchema.pre('findOneAndUpdate', function (next) {
+    next(new Error('Payment data is immutable and cannot be modified.'));
+});
+
+// ==========================================
+// ৩. মডেল এক্সপোর্ট
+// ==========================================
+const Payment = mongoose.model('Payment', paymentSchema);
+
+module.exports = Payment;
