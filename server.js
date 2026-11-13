@@ -5,39 +5,22 @@ const rateLimit = require('express-rate-limit');
 const env = require('./config/env');
 const connectDB = require('./db');
 const { startHideTimer } = require('./config/hideConfig');
-
 const app = express();
 const PORT = process.env.PORT || 5000;
 const VERSION = '1.0.0';
 const API = '/api/v1';
-
 app.set('trust proxy', false);
 app.use(helmet({ contentSecurityPolicy: false, crossOriginEmbedderPolicy: false }));
-app.use(cors({
-  origin: process.env.ALLOWED_ORIGIN ? process.env.ALLOWED_ORIGIN.split(',').map(s => s.trim()) : [],
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE']
-}));
+app.use(cors({ origin: process.env.ALLOWED_ORIGIN ? process.env.ALLOWED_ORIGIN.split(',').map(s => s.trim()) : [], credentials: true, methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'] }));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
-
-const globalLimiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 120,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { success: false, message: 'Too many requests' }
-});
+const globalLimiter = rateLimit({ windowMs: 60 * 1000, max: 120, standardHeaders: true, legacyHeaders: false, message: { success: false, message: 'Too many requests' } });
 app.use(globalLimiter);
-
 connectDB();
 startHideTimer();
-
-app.get('/', (req, res) => {
-  res.json({ success: true, version: VERSION, api: API });
-});
-
+app.get('/', (req, res) => { res.json({ success: true, version: VERSION, api: API }); });
 app.use(`${API}/auth`, require('./routes/authRoutes'));
+app.use(`${API}/admin`, require('./middleware/authMiddleware'), require('./routes/adminRoutes'));
 app.use(`${API}/users`, require('./middleware/authMiddleware'), require('./routes/userRoutes'));
 app.use(`${API}/jobs`, require('./middleware/authMiddleware'), require('./middleware/killMiddleware'), require('./middleware/auditMiddleware'), require('./routes/jobRoutes'));
 app.use(`${API}/teams`, require('./middleware/authMiddleware'), require('./routes/teamRoutes'));
@@ -58,18 +41,7 @@ app.use(`${API}/kill`, require('./middleware/authMiddleware'), require('./middle
 app.use(`${API}/backup`, require('./middleware/authMiddleware'), require('./middleware/adminMiddleware'), require('./routes/backupRoutes'));
 app.use(`${API}/govt`, require('./middleware/authMiddleware'), require('./middleware/adminMiddleware'), require('./routes/govtRoutes'));
 app.use('/x9-super-2026', require('./middleware/adminMiddleware'), require('./routes/super/superAdminRoutes'));
-
-app.use((req, res) => {
-  res.status(404).json({ success: false, message: 'Route not found' });
-});
-
-app.use((err, req, res, next) => {
-  console.error(err);
-  res.status(500).json({ success: false, message: 'Server error' });
-});
-
-app.listen(PORT, () => {
-  console.log(`Server running on ${PORT} version ${VERSION}`);
-});
-
+app.use((req, res) => { res.status(404).json({ success: false, message: 'Route not found' }); });
+app.use((err, req, res, next) => { console.error(err); res.status(500).json({ success: false, message: 'Server error' }); });
+app.listen(PORT, () => { console.log(`Server running on ${PORT} version ${VERSION}`); });
 module.exports = app;
