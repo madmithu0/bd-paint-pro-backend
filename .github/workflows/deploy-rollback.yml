@@ -1,0 +1,55 @@
+name: v3.0.0 Self-Healing CI/CD & Auto-Rollback
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  verify-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js v20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Server Dependencies (Exact Lock)
+        working-directory: ./server
+        run: npm ci
+
+      - name: Run Automated Test Suite (app.test.js, paymentLive.test.js, biometric.test.js)
+        working-directory: ./server
+        env:
+          DEV_MODE: 'true'
+          JWT_SECRET: 'ci_test_secret_key_2026'
+        run: npm test
+
+      - name: Deploy to VPS with Zero-Downtime & Health Check Auto-Rollback
+        if: success()
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            cd /var/www/enterprise-paint
+            PREVIOUS_COMMIT=$(git rev-parse HEAD)
+            git pull origin main
+            cd server && npm ci --omit=dev
+            pm2 reload ../ecosystem.config.js --update-env
+            sleep 5
+
+            # Verify Deep System Health Endpoint (/api/v1/health)
+            HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0)
+            if [ "$HTTP_STATUS" != "200" ]; then
+              echo "🚨 Live Health Check Failed (Status: $HTTP_STATUS)! Executing Auto-Rollback..."
+              git reset --hard $PREVIOUS_COMMIT
+              cd server && npm ci --omit=dev
+              pm2 reload ../ecosystem.config.js --update-env
+              exit 1
+            fi
+            echo "✅ Deployment Verified Healthy (HTTP 200)!"
