@@ -1,0 +1,25 @@
+# Environment & Secret Files (কখনো পাবলিকলি আপলোড হবে না)
+.env
+.env.*
+server/.env
+client/.env
+
+# Dependencies
+node_modules/
+server/node_modules/
+client/node_modules/
+
+# Super Admin Sensitive Biometric & Temp Data
+server/temp/
+server/quarantine/
+*.pem
+*.key
+*voice_hash*
+*face_data*
+
+# Build & System Logs
+client/dist/
+client/build/
+logs/
+*.log
+.DS_Store
