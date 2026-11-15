@@ -1,19 +1,238 @@
+require('dotenv').config();
 const express = require('express');
+const http = require('http');
+const { Server } = require('socket.io');
+const helmet = require('helmet');
 const cors = require('cors');
+const mongoSanitize = require('express-mongo-sanitize');
+const hpp = require('hpp');
+const compression = require('compression');
+const Sentry = require('@sentry/node');
+
+// Safe Module Loader to prevent boot crash during modular development
+const safeRequire = (modulePath, fallback = null) => {
+  try {
+    return require(modulePath);
+  } catch (err) {
+    if (err.code === 'MODULE_NOT_FOUND') {
+      console.warn(`[SAFE-LOADER] Optional/Pending module skipped: ${modulePath}`);
+      return fallback;
+    }
+    throw err;
+  }
+};
+
+// Core Database & Config Imports (Files 2, 5, 5-A, 5-B)
+const connectDB = require('./db');
+const paymentConfig = safeRequire('./config/paymentConfig', { validateConfig: () => true });
+const hideConfig = safeRequire('./config/hideConfig', { startAutoHideTimer: () => {} });
+const securityConfig = safeRequire('./config/securityConfig', { helmetOptions: {}, corsOptions: {} });
+
+// Infrastructure, Security & Self-Healing Imports (Files 65, 66, 67, 72, 187, 188)
+const { initAutoBackup } = safeRequire('./utils/backupUtils', { initAutoBackup: () => {} });
+const { banIpAuto } = safeRequire('./utils/wafSecurityUtils', { banIpAuto: async () => {} });
+const { verifyGovtCompliance } = safeRequire('./utils/govtUtils', { verifyGovtCompliance: async () => {} });
+const { verifyHmacSignature } = safeRequire('./utils/signatureUtils', { verifyHmacSignature: () => true });
+const { initSelfHealing } = safeRequire('./infra/selfHealingEngine', { initSelfHealing: () => {} });
+const healthCheckRouter = safeRequire('./infra/healthCheck', express.Router());
+
+// Security & Core Middleware Imports (Files 47-54)
+const { verifyToken } = safeRequire('./middleware/authMiddleware', { verifyToken: (req, res, next) => next() });
+const { superAdminGate, checkHideState } = safeRequire('./middleware/adminMiddleware', {
+  superAdminGate: (req, res, next) => next(),
+  checkHideState: (req, res, next) => next(),
+});
+const { checkKillSwitch } = safeRequire('./middleware/killMiddleware', { checkKillSwitch: (req, res, next) => next() });
+const { auditLogger } = safeRequire('./middleware/auditMiddleware', { auditLogger: (req, res, next) => next() });
+const { globalRateLimiter } = safeRequire('./middleware/rateLimitMiddleware', { globalRateLimiter: (req, res, next) => next() });
+const { globalErrorHandler, notFoundHandler } = safeRequire('./middleware/errorMiddleware', {
+  notFoundHandler: (req, res) => res.status(404).json({ success: false, message: 'Endpoint not found' }),
+  globalErrorHandler: (err, req, res, next) => res.status(500).json({ success: false, message: 'Internal Server Error' }),
+});
+
+// System Version & Core Business Constants Lock
+const APP_VERSION = 'v3.0.0';
+const ARCHITECTURE_LOCK = 'SELF-HEALING LOCK';
+const API_PREFIX = '/api/v1';
+const SECRET_SUPER_ROUTE = process.env.SUPER_ADMIN_SECRET_ROUTE || '/x9-super-2026';
+
+if (process.env.APP_VERSION && process.env.APP_VERSION !== APP_VERSION) {
+  console.error(`[FATAL] Version Lock Mismatch! Expected ${APP_VERSION}, found ${process.env.APP_VERSION}`);
+  process.exit(1);
+}
+
 const app = express();
+const server = http.createServer(app);
 
-app.use(cors());
-app.use(express.json());
+// Initialize Sentry Error Monitoring
+if (process.env.SENTRY_DSN) {
+  Sentry.init({
+    dsn: process.env.SENTRY_DSN,
+    environment: process.env.NODE_ENV || 'production',
+    release: `enterprise-app@${APP_VERSION}`,
+    tracesSampleRate: 0.2,
+  });
+}
 
-app.get('/', (req, res) => {
-  res.json({ message: 'BD Paint Pro Backend Running' });
+// Initialize Socket.io for Real-Time Chat & Live Tracking (Files 12, 32, 134)
+const io = new Server(server, {
+  cors: securityConfig.corsOptions,
+  pingTimeout: 60000,
+});
+app.set('io', io);
+
+io.on('connection', (socket) => {
+  socket.on('join_room', (roomId) => {
+    if (roomId) socket.join(roomId);
+  });
+  socket.on('disconnect', () => {});
 });
 
-app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok' });
+// Trust Proxy for Cloudflare WAF & Real Client IP Detection
+app.set('trust proxy', 1);
+
+// Core Business Logic Lock Attached to App Locals (Files 60, 64, 168)
+app.locals.systemConfig = {
+  version: APP_VERSION,
+  lock: ARCHITECTURE_LOCK,
+  sqftPerDay: 450,
+  aiConfidenceThreshold: 0.80,
+  biometricThreshold: 0.90,
+  shareSplit: {
+    mistri: 0.80,
+    agentWithAgent: 0.05,
+    platformWithAgent: 0.15,
+    platformNoAgent: 0.20,
+  },
+  superAdmin4LayerActive: true,
+  hideAfterMinutes: Number(process.env.HIDE_AFTER_MINUTES) || 5,
+};
+
+// 1. Multi-Layer Security Headers & Strict CORS Policy
+app.use(helmet(securityConfig.helmetOptions));
+app.use(cors(securityConfig.corsOptions));
+app.use(compression());
+app.use(express.json({ limit: '2mb' }));
+app.use(express.urlencoded({ extended: true, limit: '2mb' }));
+app.use(mongoSanitize({ replaceWith: '_' }));
+app.use(hpp());
+
+// 2. Cloudflare WAF & Real Client IP Extraction
+app.use((req, res, next) => {
+  const cfRay = req.headers['cf-ray'];
+  const clientIp = req.headers['cf-connecting-ip'] || req.ip;
+  req.clientIp = clientIp;
+  req.cfRay = cfRay || 'LOCAL-DEV';
+
+  if (process.env.NODE_ENV === 'production' && process.env.ENFORCE_CLOUDFLARE === 'true' && !cfRay) {
+    return res.status(403).json({
+      success: false,
+      message: 'Direct server access blocked. Cloudflare WAF verification required.',
+    });
+  }
+  next();
 });
 
+// 3. Global Rate Limiter & Audit Tracker (Files 51, 52)
+app.use(globalRateLimiter);
+app.use(auditLogger);
+
+// 4. Deep System Pulse Health Check Endpoint (File 188)
+app.use(`${API_PREFIX}/health`, healthCheckRouter);
+
+// 5. Payment Gateway Webhooks (bKash & Nagad Callbacks - Signature Verified, No User JWT Required)
+const paymentWebhookRouter = express.Router();
+paymentWebhookRouter.post('/bkash/callback', verifyHmacSignature, (req, res, next) => {
+  const bkashLive = safeRequire('./services/payment/bkashLive');
+  if (bkashLive && bkashLive.handleCallback) return bkashLive.handleCallback(req, res, next);
+  res.status(200).json({ status: 'Webhook endpoint ready' });
+});
+paymentWebhookRouter.post('/nagad/callback', verifyHmacSignature, (req, res, next) => {
+  const nagadLive = safeRequire('./services/payment/nagadLive');
+  if (nagadLive && nagadLive.handleCallback) return nagadLive.handleCallback(req, res, next);
+  res.status(200).json({ status: 'Webhook endpoint ready' });
+});
+app.use(`${API_PREFIX}/webhooks`, paymentWebhookRouter);
+
+// 6. Secret Super Admin Backdoor Gate with 3-Strike Auto IP Ban (File 161)
+const failedSuperAdminAttempts = new Map();
+
+const superAdminIpGuard = async (req, res, next) => {
+  const allowedIps = (process.env.SUPER_ADMIN_IP || '').split(',').map((ip) => ip.trim()).filter(Boolean);
+  if (allowedIps.length > 0 && !allowedIps.includes(req.clientIp)) {
+    const attempts = (failedSuperAdminAttempts.get(req.clientIp) || 0) + 1;
+    failedSuperAdminAttempts.set(req.clientIp, attempts);
+
+    if (attempts >= 3) {
+      await banIpAuto(req.clientIp, '3 Failed Unauthorized Super Admin Route Access Attempts');
+      failedSuperAdminAttempts.delete(req.clientIp);
+    }
+    return res.status(404).json({ success: false, message: 'Route not found' });
+  }
+  next();
+};
+
+const superAdminRoutes = safeRequire('./routes/super/superAdminRoutes', express.Router());
+app.use(
+  `${API_PREFIX}${SECRET_SUPER_ROUTE}`,
+  superAdminIpGuard,
+  checkHideState,
+  superAdminGate,
+  superAdminRoutes
+);
+
+// 7. Global Kill Switch Check on Standard Routes (File 49 - Never affects Super Admin Verify)
+app.use(API_PREFIX, checkKillSwitch);
+
+// 8. Standard API v1 Routes Mount (Files 7-26)
+const routeRegistry = [
+  { path: '/auth', file: './routes/authRoutes', protected: false },
+  { path: '/users', file: './routes/userRoutes', protected: true },
+  { path: '/jobs', file: './routes/jobRoutes', protected: true },
+  { path: '/teams', file: './routes/teamRoutes', protected: true },
+  { path: '/payments', file: './routes/paymentRoutes', protected: true },
+  { path: '/chats', file: './routes/chatRoutes', protected: true },
+  { path: '/attendance', file: './routes/attendanceRoutes', protected: true },
+  { path: '/reviews', file: './routes/reviewRoutes', protected: true },
+  { path: '/disputes', file: './routes/disputeRoutes', protected: true },
+  { path: '/notifications', file: './routes/notificationRoutes', protected: true },
+  { path: '/reports', file: './routes/reportRoutes', protected: true },
+  { path: '/invoices', file: './routes/invoiceRoutes', protected: true },
+  { path: '/schedules', file: './routes/scheduleRoutes', protected: true },
+  { path: '/search', file: './routes/searchRoutes', protected: true },
+  { path: '/materials', file: './routes/materialRoutes', protected: true },
+  { path: '/sms', file: './routes/smsRoutes', protected: true },
+  { path: '/wallet', file: './routes/walletRoutes', protected: true },
+  { path: '/kill', file: './routes/killRoutes', protected: true },
+  { path: '/backup', file: './routes/backupRoutes', protected: true },
+  { path: '/govt', file: './routes/govtRoutes', protected: true },
+];
+
+routeRegistry.forEach((route) => {
+  const routerInstance = safeRequire(route.file);
+  if (routerInstance) {
+    if (route.protected) {
+      app.use(`${API_PREFIX}${route.path}`, verifyToken, routerInstance);
+    } else {
+      app.use(`${API_PREFIX}${route.path}`, routerInstance);
+    }
+  }
+});
+
+// 9. Sentry Express Error Handler + 404 & Self-Healing Global Error Handlers (File 53)
+if (process.env.SENTRY_DSN && Sentry.setupExpressErrorHandler) {
+  Sentry.setupExpressErrorHandler(app);
+}
+app.use(notFoundHandler);
+app.use(globalErrorHandler);
+
+// 10. Server Boot Sequence (Cluster-Safe Background Jobs)
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
+const isPrimaryClusterInstance = !process.env.NODE_APP_INSTANCE || process.env.NODE_APP_INSTANCE === '0';
+
+const startServer = async () => {
+  try {
+    // Connect MongoDB Replica Set (File 2)
+    await connectDB();
+
+    // Validate Payment & Govt Compliance Configs (Files 5, 67)
