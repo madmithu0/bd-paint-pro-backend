@@ -8,7 +8,17 @@ const verifyFace3DBiometric = async ({
   eyeBlinkDetected = false,
 }) => {
   try {
-    // 1. Strict Static Photo Block: Only live video streams are accepted
+    const enrolledFaceData = process.env.SUPER_ADMIN_FACE_3D_DATA;
+
+    if (!enrolledFaceData) {
+      return {
+        verified: false,
+        score: 0,
+        reason: 'ENROLLED_FACE_DATA_MISSING',
+        message: 'Super Admin 3D face reference data is missing in server configuration.',
+      };
+    }
+
     if (String(mediaType).startsWith('image/') || !faceVideoBase64) {
       return {
         verified: false,
@@ -18,10 +28,9 @@ const verifyFace3DBiometric = async ({
       };
     }
 
-    // 2. Call External 3D Liveness & Head Pose Verification API
     const apiResult = await callBiometricProvider('/verify-face-3d', {
       videoBase64: faceVideoBase64,
-      enrolledFaceMesh: process.env.SUPER_ADMIN_3D_FACE_DATA,
+      enrolledFaceMesh: enrolledFaceData,
       clientHeadMovements: headMovements,
       clientBlinkFlag: eyeBlinkDetected,
       requireHeadTurn: true,
@@ -31,9 +40,9 @@ const verifyFace3DBiometric = async ({
     const livenessScore = Number(apiResult.score || 0);
     const headMoveOk = apiResult.headMovementVerified === true;
     const blinkOk = apiResult.eyeBlinkVerified === true;
+    const requiredThreshold = Number(biometricConfig.faceThresholdLock || 0.90);
 
-    // 3. Enforce 0.90 Score Lock + Active Liveness Challenges
-    if (!headMoveOk || !blinkOk || livenessScore < biometricConfig.faceThresholdLock) {
+    if (!headMoveOk || !blinkOk || livenessScore < requiredThreshold) {
       return {
         verified: false,
         score: livenessScore,
@@ -42,7 +51,7 @@ const verifyFace3DBiometric = async ({
           : !blinkOk
           ? 'EYE_BLINK_NOT_DETECTED'
           : 'FACE_LIVENESS_BELOW_0_90',
-        message: `3D Face verification failed (Score: ${livenessScore}, Required: >= ${biometricConfig.faceThresholdLock}).`,
+        message: `3D Face verification failed (Score: ${livenessScore}, Required: >= ${requiredThreshold}).`,
       };
     }
 
@@ -58,7 +67,7 @@ const verifyFace3DBiometric = async ({
       verified: false,
       score: 0,
       reason: 'FACE_3D_SERVICE_ERROR',
-      message: error.message,
+      message: error.message || 'Biometric 3D face service encountered an error.',
     };
   }
 };
