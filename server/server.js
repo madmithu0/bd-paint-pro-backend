@@ -9,7 +9,6 @@ const hpp = require('hpp');
 const compression = require('compression');
 const Sentry = require('@sentry/node');
 
-// Safe Module Loader to prevent boot crash during modular development
 const safeRequire = (modulePath, fallback = null) => {
   try {
     return require(modulePath);
@@ -22,13 +21,11 @@ const safeRequire = (modulePath, fallback = null) => {
   }
 };
 
-// Core Database & Config Imports (Files 2, 5, 5-A, 5-B)
 const connectDB = require('./db');
 const paymentConfig = safeRequire('./config/paymentConfig', { validateConfig: () => true });
 const hideConfig = safeRequire('./config/hideConfig', { startAutoHideTimer: () => {} });
 const securityConfig = safeRequire('./config/securityConfig', { helmetOptions: {}, corsOptions: {} });
 
-// Infrastructure, Security & Self-Healing Imports (Files 65, 66, 67, 72, 187, 188)
 const { initAutoBackup } = safeRequire('./utils/backupUtils', { initAutoBackup: () => {} });
 const { banIpAuto } = safeRequire('./utils/wafSecurityUtils', { banIpAuto: async () => {} });
 const { verifyGovtCompliance } = safeRequire('./utils/govtUtils', { verifyGovtCompliance: async () => {} });
@@ -36,10 +33,8 @@ const { verifyHmacSignature } = safeRequire('./utils/signatureUtils', { verifyHm
 const { initSelfHealing } = safeRequire('./infra/selfHealingEngine', { initSelfHealing: () => {} });
 const healthCheckRouter = safeRequire('./infra/healthCheck', express.Router());
 
-// Security & Core Middleware Imports (Files 47-54)
 const { verifyToken } = safeRequire('./middleware/authMiddleware', { verifyToken: (req, res, next) => next() });
-const { superAdminGate, checkHideState } = safeRequire('./middleware/adminMiddleware', {
-  superAdminGate: (req, res, next) => next(),
+const { checkHideState } = safeRequire('./middleware/adminMiddleware', {
   checkHideState: (req, res, next) => next(),
 });
 const { checkKillSwitch } = safeRequire('./middleware/killMiddleware', { checkKillSwitch: (req, res, next) => next() });
@@ -50,11 +45,10 @@ const { globalErrorHandler, notFoundHandler } = safeRequire('./middleware/errorM
   globalErrorHandler: (err, req, res, next) => res.status(500).json({ success: false, message: 'Internal Server Error' }),
 });
 
-// System Version & Core Business Constants Lock
 const APP_VERSION = 'v3.0.0';
 const ARCHITECTURE_LOCK = 'SELF-HEALING LOCK';
 const API_PREFIX = '/api/v1';
-const SECRET_SUPER_ROUTE = process.env.SUPER_ADMIN_SECRET_ROUTE || '/x9-super-2026';
+const SECRET_SUPER_ROUTE = process.env.SUPER_ADMIN_ROUTE || process.env.SUPER_ADMIN_SECRET_ROUTE || '/x9-super-2026';
 
 if (process.env.APP_VERSION && process.env.APP_VERSION !== APP_VERSION) {
   console.error(`[FATAL] Version Lock Mismatch! Expected ${APP_VERSION}, found ${process.env.APP_VERSION}`);
@@ -64,7 +58,6 @@ if (process.env.APP_VERSION && process.env.APP_VERSION !== APP_VERSION) {
 const app = express();
 const server = http.createServer(app);
 
-// Initialize Sentry Error Monitoring
 if (process.env.SENTRY_DSN) {
   Sentry.init({
     dsn: process.env.SENTRY_DSN,
@@ -74,7 +67,6 @@ if (process.env.SENTRY_DSN) {
   });
 }
 
-// Initialize Socket.io for Real-Time Chat & Live Tracking (Files 12, 32, 134)
 const io = new Server(server, {
   cors: securityConfig.corsOptions,
   pingTimeout: 60000,
@@ -88,10 +80,8 @@ io.on('connection', (socket) => {
   socket.on('disconnect', () => {});
 });
 
-// Trust Proxy for Cloudflare WAF & Real Client IP Detection
 app.set('trust proxy', 1);
 
-// Core Business Logic Lock Attached to App Locals (Files 60, 64, 168)
 app.locals.systemConfig = {
   version: APP_VERSION,
   lock: ARCHITECTURE_LOCK,
@@ -108,19 +98,18 @@ app.locals.systemConfig = {
   hideAfterMinutes: Number(process.env.HIDE_AFTER_MINUTES) || 5,
 };
 
-// 1. Multi-Layer Security Headers & Strict CORS Policy
 app.use(helmet(securityConfig.helmetOptions));
 app.use(cors(securityConfig.corsOptions));
 app.use(compression());
-app.use(express.json({ limit: '2mb' }));
-app.use(express.urlencoded({ extended: true, limit: '2mb' }));
+app.use(express.json({ limit: '25mb' }));
+app.use(express.urlencoded({ extended: true, limit: '25mb' }));
 app.use(mongoSanitize({ replaceWith: '_' }));
 app.use(hpp());
 
-// 2. Cloudflare WAF & Real Client IP Extraction
 app.use((req, res, next) => {
   const cfRay = req.headers['cf-ray'];
-  const clientIp = req.headers['cf-connecting-ip'] || req.ip;
+  const rawIp = req.headers['cf-connecting-ip'] || req.ip || '';
+  const clientIp = String(rawIp).replace(/^::ffff:/, '');
   req.clientIp = clientIp;
   req.cfRay = cfRay || 'LOCAL-DEV';
 
@@ -133,14 +122,11 @@ app.use((req, res, next) => {
   next();
 });
 
-// 3. Global Rate Limiter & Audit Tracker (Files 51, 52)
 app.use(globalRateLimiter);
 app.use(auditLogger);
 
-// 4. Deep System Pulse Health Check Endpoint (File 188)
 app.use(`${API_PREFIX}/health`, healthCheckRouter);
 
-// 5. Payment Gateway Webhooks (bKash & Nagad Callbacks - Signature Verified, No User JWT Required)
 const paymentWebhookRouter = express.Router();
 paymentWebhookRouter.post('/bkash/callback', verifyHmacSignature, (req, res, next) => {
   const bkashLive = safeRequire('./services/payment/bkashLive');
@@ -154,7 +140,6 @@ paymentWebhookRouter.post('/nagad/callback', verifyHmacSignature, (req, res, nex
 });
 app.use(`${API_PREFIX}/webhooks`, paymentWebhookRouter);
 
-// 6. Secret Super Admin Backdoor Gate with 3-Strike Auto IP Ban (File 161)
 const failedSuperAdminAttempts = new Map();
 
 const superAdminIpGuard = async (req, res, next) => {
@@ -177,14 +162,11 @@ app.use(
   `${API_PREFIX}${SECRET_SUPER_ROUTE}`,
   superAdminIpGuard,
   checkHideState,
-  superAdminGate,
   superAdminRoutes
 );
 
-// 7. Global Kill Switch Check on Standard Routes (File 49 - Never affects Super Admin Verify)
 app.use(API_PREFIX, checkKillSwitch);
 
-// 8. Standard API v1 Routes Mount (Files 7-26)
 const routeRegistry = [
   { path: '/auth', file: './routes/authRoutes', protected: false },
   { path: '/users', file: './routes/userRoutes', protected: true },
@@ -219,20 +201,46 @@ routeRegistry.forEach((route) => {
   }
 });
 
-// 9. Sentry Express Error Handler + 404 & Self-Healing Global Error Handlers (File 53)
 if (process.env.SENTRY_DSN && Sentry.setupExpressErrorHandler) {
   Sentry.setupExpressErrorHandler(app);
 }
 app.use(notFoundHandler);
 app.use(globalErrorHandler);
 
-// 10. Server Boot Sequence (Cluster-Safe Background Jobs)
 const PORT = process.env.PORT || 5000;
 const isPrimaryClusterInstance = !process.env.NODE_APP_INSTANCE || process.env.NODE_APP_INSTANCE === '0';
 
 const startServer = async () => {
   try {
-    // Connect MongoDB Replica Set (File 2)
     await connectDB();
 
-    // Validate Payment & Govt Compliance Configs (Files 5, 67)
+    if (paymentConfig.validateConfig) paymentConfig.validateConfig();
+    if (hideConfig.startAutoHideTimer) hideConfig.startAutoHideTimer();
+    if (initSelfHealing) initSelfHealing(server);
+
+    if (isPrimaryClusterInstance) {
+      if (initAutoBackup) initAutoBackup();
+      if (verifyGovtCompliance) await verifyGovtCompliance();
+    }
+
+    server.listen(PORT, () => {
+      console.log(`[BOOT] Enterprise Server ${APP_VERSION} (${ARCHITECTURE_LOCK}) running on port ${PORT}`);
+    });
+  } catch (error) {
+    console.error('[BOOT-FATAL] Server failed to start:', error);
+    process.exit(1);
+  }
+};
+
+const gracefulShutdown = (signal) => {
+  console.log(`[SHUTDOWN] Received ${signal}. Closing server gracefully...`);
+  server.close(() => {
+    console.log('[SHUTDOWN] HTTP server closed.');
+    process.exit(0);
+  });
+};
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
+startServer();
