@@ -6,30 +6,100 @@ const OTP = require('../../models/OTP');
 const AuditLog = require('../../models/AuditLog');
 const HackLog = require('../../models/HackLog');
 const adminController = require('../../controllers/adminController');
+const adminMiddleware = require('../../middleware/adminMiddleware');
 const { sendSuperAdminPhoneOtp } = require('../../utils/smsUtils');
 const { sendSuperAdminGmailOtp } = require('../../utils/emailUtils');
 const { generateSuperAdmin4LayerToken } = require('../../utils/tokenUtils');
 const { verifyVoiceBiometric } = require('../../services/biometric/voiceVerify');
 const { verifyFace3DBiometric } = require('../../services/biometric/face3DVerify');
 
+const verifySuperAdminToken =
+  adminMiddleware.superAdminGate ||
+  adminMiddleware.verifySuperAdmin ||
+  adminMiddleware;
+
+const extractClientIp = (req) => {
+  const cfIp = req.headers['cf-connecting-ip'];
+  const forwarded = req.headers['x-forwarded-for'];
+  const rawIp = cfIp || (forwarded ? forwarded.split(',')[0].trim() : null) || req.clientIp || req.ip || '';
+  return String(rawIp).replace(/^::ffff:/, '');
+};
+
+const enforceSuperAdminIpGuard = async (req, res, next) => {
+  try {
+    const clientIp = extractClientIp(req);
+    req.cleanIp = clientIp;
+
+    const bannedRecord = await HackLog.findOne({
+      ipAddress: clientIp,
+      autoBlocked: true,
+    }).lean();
+
+    if (bannedRecord) {
+      return res.status(403).json({
+        success: false,
+        message: 'Access denied. IP permanently banned.',
+      });
+    }
+
+    const allowedIp = String(process.env.SUPER_ADMIN_IP || '').trim();
+    if (process.env.DEV_MODE !== 'true' && allowedIp && clientIp !== allowedIp) {
+      await HackLog.create({
+        ipAddress: clientIp,
+        cloudflareRayId: req.headers['cf-ray'] || 'DIRECT',
+        attackType: 'UNAUTHORIZED_SUPER_ADMIN_IP',
+        actionTaken: 'BLOCKED_NON_WHITELIST_IP',
+        autoBlocked: true,
+      });
+
+      return res.status(403).json({
+        success: false,
+        message: 'Access denied. Unauthorized IP address.',
+      });
+    }
+
+    next();
+  } catch (error) {
+    next(error);
+  }
+};
+
+router.use(enforceSuperAdminIpGuard);
+
 // @route   POST /api/v1/x9-super-2026/send-otps
-// @desc    Send Layer-1 (Phone OTP) and Layer-2 (Gmail OTP) to Super Admin
-// @access  Secret Route + IP Whitelist
+// @desc    Dispatch Layer-1 Phone OTP and Layer-2 Gmail OTP
 router.post('/send-otps', async (req, res, next) => {
   try {
+    const phone = String(process.env.SUPER_ADMIN_PHONE || '').trim();
+    const email = String(process.env.SUPER_ADMIN_GMAIL || '').trim();
+
+    if (!phone || !email) {
+      return res.status(500).json({
+        success: false,
+        message: 'Super Admin contact configuration missing on server.',
+      });
+    }
+
     const phoneOtp = String(crypto.randomInt(100000, 999999));
     const gmailOtp = String(crypto.randomInt(100000, 999999));
     const expiresAt = new Date(Date.now() + 5 * 60 * 1000);
 
+    await OTP.deleteMany({
+      $or: [
+        { phone, purpose: 'SUPER_ADMIN_PHONE', verified: false },
+        { email, purpose: 'SUPER_ADMIN_GMAIL', verified: false },
+      ],
+    });
+
     await Promise.all([
       OTP.create({
-        phone: process.env.SUPER_ADMIN_PHONE,
+        phone,
         code: phoneOtp,
         purpose: 'SUPER_ADMIN_PHONE',
         expiresAt,
       }),
       OTP.create({
-        email: process.env.SUPER_ADMIN_GMAIL,
+        email,
         code: gmailOtp,
         purpose: 'SUPER_ADMIN_GMAIL',
         expiresAt,
@@ -41,9 +111,9 @@ router.post('/send-otps', async (req, res, next) => {
       sendSuperAdminGmailOtp(gmailOtp),
     ]);
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
-      message: 'Layer-1 Phone OTP and Layer-2 Gmail OTP dispatched to Super Admin.',
+      message: 'Phone OTP and Gmail OTP sent successfully.',
       ...(process.env.DEV_MODE === 'true' && { devPhoneOtp: phoneOtp, devGmailOtp: gmailOtp }),
     });
   } catch (error) {
@@ -52,49 +122,57 @@ router.post('/send-otps', async (req, res, next) => {
 });
 
 // @route   POST /api/v1/x9-super-2026/verify-4-layer
-// @desc    Verify All 4 Layers (Phone OTP + Gmail OTP + Live Voice + Live 3D Face)
-// @access  Secret Route + IP Whitelist
+// @desc    Verify Phone OTP, Gmail OTP, Live Voice, and Live 3D Face
 router.post('/verify-4-layer', async (req, res, next) => {
   try {
-    const { phoneOtp, gmailOtp, voiceSampleBase64, voiceTranscript, faceVideoBase64 } = req.body;
-
-    // Layer 1: Phone OTP Check
-    const validPhoneOtp = await OTP.findOne({
-      phone: process.env.SUPER_ADMIN_PHONE,
-      code: String(phoneOtp || '').trim(),
-      purpose: 'SUPER_ADMIN_PHONE',
-      verified: false,
-      expiresAt: { $gt: new Date() },
-    });
-
-    // Layer 2: Gmail OTP Check
-    const validGmailOtp = await OTP.findOne({
-      email: process.env.SUPER_ADMIN_GMAIL,
-      code: String(gmailOtp || '').trim(),
-      purpose: 'SUPER_ADMIN_GMAIL',
-      verified: false,
-      expiresAt: { $gt: new Date() },
-    });
-
-    // Layer 3: Live Voice Biometric Check (Score >= 0.90 Lock)
-    const voiceResult = await verifyVoiceBiometric({
+    const {
+      phoneOtp,
+      gmailOtp,
       voiceSampleBase64,
-      transcript: voiceTranscript,
-    });
-
-    // Layer 4: Live 3D Face Head Move & Blink Check (Score >= 0.90 Lock)
-    const faceResult = await verifyFace3DBiometric({
+      voiceTranscript,
       faceVideoBase64,
-    });
+      headMovements,
+      eyeBlinkDetected,
+    } = req.body;
+
+    const clientIp = req.cleanIp;
+    const phone = String(process.env.SUPER_ADMIN_PHONE || '').trim();
+    const email = String(process.env.SUPER_ADMIN_GMAIL || '').trim();
+    const superAdminId = String(process.env.SUPER_ADMIN_ID || 'SA_2026_MASTER').trim();
+
+    const [validPhoneOtp, validGmailOtp, voiceResult, faceResult] = await Promise.all([
+      OTP.findOne({
+        phone,
+        code: String(phoneOtp || '').trim(),
+        purpose: 'SUPER_ADMIN_PHONE',
+        verified: false,
+        expiresAt: { $gt: new Date() },
+      }),
+      OTP.findOne({
+        email,
+        code: String(gmailOtp || '').trim(),
+        purpose: 'SUPER_ADMIN_GMAIL',
+        verified: false,
+        expiresAt: { $gt: new Date() },
+      }),
+      verifyVoiceBiometric({
+        voiceSampleBase64,
+        transcript: voiceTranscript,
+      }),
+      verifyFace3DBiometric({
+        faceVideoBase64,
+        headMovements,
+        eyeBlinkDetected,
+      }),
+    ]);
 
     const layerStatus = {
       phoneOtp: Boolean(validPhoneOtp),
       gmailOtp: Boolean(validGmailOtp),
-      voiceVerified: Boolean(voiceResult.verified),
-      face3DVerified: Boolean(faceResult.verified),
+      voiceVerified: Boolean(voiceResult && voiceResult.verified),
+      face3DVerified: Boolean(faceResult && faceResult.verified),
     };
 
-    // All 4 must be Green to unlock Dashboard
     if (
       !layerStatus.phoneOtp ||
       !layerStatus.gmailOtp ||
@@ -102,47 +180,66 @@ router.post('/verify-4-layer', async (req, res, next) => {
       !layerStatus.face3DVerified
     ) {
       await AuditLog.create({
-        user: process.env.SUPER_ADMIN_ID || 'SUPER_ADMIN',
+        user: superAdminId,
         role: 'SuperAdmin',
         action: '4_LAYER_BIOMETRIC_VERIFY_FAILED',
         category: 'BIOMETRIC_FAIL',
-        ipAddress: req.clientIp,
-        details: { layerStatus, voiceScore: voiceResult.score, faceScore: faceResult.score },
+        ipAddress: clientIp,
+        details: {
+          layerStatus,
+          voiceScore: voiceResult?.score || 0,
+          faceScore: faceResult?.score || 0,
+        },
       });
+
+      const recentFails = await AuditLog.countDocuments({
+        ipAddress: clientIp,
+        action: '4_LAYER_BIOMETRIC_VERIFY_FAILED',
+        createdAt: { $gt: new Date(Date.now() - 15 * 60 * 1000) },
+      });
+
+      if (recentFails >= 3) {
+        await HackLog.create({
+          ipAddress: clientIp,
+          cloudflareRayId: req.headers['cf-ray'] || 'DIRECT',
+          attackType: 'SUPER_ADMIN_BRUTE_FORCE',
+          actionTaken: 'AUTO_BANNED_AFTER_3_FAILS',
+          autoBlocked: true,
+        });
+      }
 
       return res.status(401).json({
         success: false,
-        message: '4-Layer Verification Failed. All 4 indicators must be green.',
+        message: '4-Layer verification failed. All 4 layers must pass.',
         layers: layerStatus,
         scores: {
-          voiceScore: voiceResult.score,
-          faceScore: faceResult.score,
+          voiceScore: voiceResult?.score || 0,
+          faceScore: faceResult?.score || 0,
         },
       });
     }
 
-    // Mark OTPs as used
     validPhoneOtp.verified = true;
     validGmailOtp.verified = true;
     await Promise.all([validPhoneOtp.save(), validGmailOtp.save()]);
 
     const superToken = generateSuperAdmin4LayerToken({
-      superAdminId: process.env.SUPER_ADMIN_ID,
-      clientIp: req.clientIp,
+      superAdminId,
+      clientIp,
       layers: layerStatus,
     });
 
     await AuditLog.create({
-      user: process.env.SUPER_ADMIN_ID,
+      user: superAdminId,
       role: 'SuperAdmin',
       action: '4_LAYER_BIOMETRIC_VERIFY_SUCCESS',
       category: 'ADMIN',
-      ipAddress: req.clientIp,
+      ipAddress: clientIp,
     });
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
-      message: 'All 4 Security Layers Green! Super Admin Dashboard Unlocked.',
+      message: 'All 4 security layers verified. Dashboard unlocked.',
       layers: layerStatus,
       superToken,
     });
@@ -152,28 +249,53 @@ router.post('/verify-4-layer', async (req, res, next) => {
 });
 
 // @route   POST /api/v1/x9-super-2026/hardware-recovery
-// @desc    Offline Hardware Recovery Key Fallback when Biometric API is Down
-// @access  Secret Route + IP Whitelist
+// @desc    Offline Hardware Recovery Key fallback
 router.post('/hardware-recovery', async (req, res, next) => {
   try {
     const { hardwareKey, superAdminId } = req.body;
-    const expectedKey = process.env.OFFLINE_HARDWARE_RECOVERY_KEY;
-    const expectedId = process.env.SUPER_ADMIN_ID;
+    const expectedKey = String(process.env.OFFLINE_HARDWARE_RECOVERY_KEY || '').trim();
+    const expectedId = String(process.env.SUPER_ADMIN_ID || '').trim();
+    const clientIp = req.cleanIp;
 
-    if (!expectedKey || hardwareKey !== expectedKey || superAdminId !== expectedId) {
+    if (!expectedKey || !expectedId || hardwareKey !== expectedKey || superAdminId !== expectedId) {
       await AuditLog.create({
         user: superAdminId || 'UNKNOWN',
         action: 'HARDWARE_RECOVERY_KEY_FAILED',
         category: 'BIOMETRIC_FAIL',
-        ipAddress: req.clientIp,
+        ipAddress: clientIp,
       });
-      return res.status(401).json({ success: false, message: 'Invalid Offline Hardware Recovery Key.' });
+
+      const recentFails = await AuditLog.countDocuments({
+        ipAddress: clientIp,
+        action: 'HARDWARE_RECOVERY_KEY_FAILED',
+        createdAt: { $gt: new Date(Date.now() - 15 * 60 * 1000) },
+      });
+
+      if (recentFails >= 3) {
+        await HackLog.create({
+          ipAddress: clientIp,
+          cloudflareRayId: req.headers['cf-ray'] || 'DIRECT',
+          attackType: 'HARDWARE_KEY_BRUTE_FORCE',
+          actionTaken: 'AUTO_BANNED_AFTER_3_FAILS',
+          autoBlocked: true,
+        });
+      }
+
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid Offline Hardware Recovery Key.',
+      });
     }
 
     const superToken = generateSuperAdmin4LayerToken({
       superAdminId: expectedId,
-      clientIp: req.clientIp,
-      layers: { phoneOtp: true, gmailOtp: true, voiceVerified: true, face3DVerified: true },
+      clientIp,
+      layers: {
+        phoneOtp: true,
+        gmailOtp: true,
+        voiceVerified: true,
+        face3DVerified: true,
+      },
     });
 
     await AuditLog.create({
@@ -181,12 +303,12 @@ router.post('/hardware-recovery', async (req, res, next) => {
       role: 'SuperAdmin',
       action: 'EMERGENCY_HARDWARE_KEY_LOGIN',
       category: 'ADMIN',
-      ipAddress: req.clientIp,
+      ipAddress: clientIp,
     });
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
-      message: 'Emergency Hardware Recovery Key accepted. Dashboard unlocked.',
+      message: 'Offline Hardware Recovery Key accepted. Dashboard unlocked.',
       superToken,
     });
   } catch (error) {
@@ -194,7 +316,9 @@ router.post('/hardware-recovery', async (req, res, next) => {
   }
 });
 
-// Protected Super Admin Control Endpoints (Requires 4-Layer Token via superAdminGate)
+// Protected Super Admin Control Endpoints
+router.use(verifySuperAdminToken);
+
 router.get('/dashboard', adminController.getDashboardStats);
 router.post('/verify-account', adminController.verifyAccount);
 router.post('/manage-user', adminController.manageUserAccount);
@@ -204,19 +328,4 @@ router.post('/hide-toggle', adminController.toggleHideMode);
 router.get('/hack-logs', async (req, res, next) => {
   try {
     const logs = await HackLog.find().sort({ createdAt: -1 }).limit(100).lean();
-    res.status(200).json({ success: true, logs });
-  } catch (err) {
-    next(err);
-  }
-});
-
-router.get('/audit-logs', async (req, res, next) => {
-  try {
-    const logs = await AuditLog.find().sort({ time: -1 }).limit(200).lean();
-    res.status(200).json({ success: true, logs });
-  } catch (err) {
-    next(err);
-  }
-});
-
-module.exports = router;
+    return res.status(200).json({ success: true, logs });
