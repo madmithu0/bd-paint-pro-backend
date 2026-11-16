@@ -11,7 +11,17 @@ const generateVoiceHash = (voiceBufferOrBase64) => {
 
 const verifyVoiceBiometric = async ({ voiceSampleBase64, transcript = '', isPreRecorded = false }) => {
   try {
-    // 1. Strict Liveness Guard: Reject pre-recorded audio immediately
+    const enrolledVoiceData = process.env.SUPER_ADMIN_VOICE_DATA;
+
+    if (!enrolledVoiceData) {
+      return {
+        verified: false,
+        score: 0,
+        reason: 'ENROLLED_VOICE_DATA_MISSING',
+        message: 'Super Admin voice reference data is missing in server configuration.',
+      };
+    }
+
     if (biometricConfig.livenessLock && isPreRecorded === true) {
       return {
         verified: false,
@@ -30,31 +40,40 @@ const verifyVoiceBiometric = async ({ voiceSampleBase64, transcript = '', isPreR
       };
     }
 
-    // 2. Call External Biometric Voice Liveness & Speaker Match API
+    const incomingHash = generateVoiceHash(voiceSampleBase64);
+    if (incomingHash === enrolledVoiceData) {
+      return {
+        verified: false,
+        score: 0,
+        reason: 'REPLAY_ATTACK_IDENTICAL_AUDIO_BLOCKED',
+        message: 'Identical pre-recorded voice sample detected and blocked.',
+      };
+    }
+
     const apiResult = await callBiometricProvider('/verify-voice', {
       audioBase64: voiceSampleBase64,
       expectedTranscript: transcript,
-      enrolledVoiceHash: process.env.SUPER_ADMIN_VOICE_HASH,
-      minDurationSeconds: biometricConfig.minVoiceDurationSeconds,
+      enrolledVoiceHash: enrolledVoiceData,
+      minDurationSeconds: biometricConfig.minVoiceDurationSeconds || 5,
     });
 
     const matchScore = Number(apiResult.score || 0);
     const livenessPassed = apiResult.isLive === true;
+    const requiredThreshold = Number(biometricConfig.voiceThresholdLock || 0.90);
 
-    // 3. Enforce 0.90 Score Lock
-    if (!livenessPassed || matchScore < biometricConfig.voiceThresholdLock) {
+    if (!livenessPassed || matchScore < requiredThreshold) {
       return {
         verified: false,
         score: matchScore,
         reason: !livenessPassed ? 'VOICE_SPOOF_DETECTED' : 'VOICE_SCORE_BELOW_0_90',
-        message: `Voice verification failed (Score: ${matchScore}, Required: >= ${biometricConfig.voiceThresholdLock}).`,
+        message: `Voice verification failed (Score: ${matchScore}, Required: >= ${requiredThreshold}).`,
       };
     }
 
     return {
       verified: true,
       score: matchScore,
-      voiceHash: generateVoiceHash(voiceSampleBase64),
+      voiceHash: incomingHash,
       message: 'Live Voice Biometric Verified (>= 0.90).',
     };
   } catch (error) {
@@ -62,7 +81,7 @@ const verifyVoiceBiometric = async ({ voiceSampleBase64, transcript = '', isPreR
       verified: false,
       score: 0,
       reason: 'VOICE_SERVICE_ERROR',
-      message: error.message,
+      message: error.message || 'Biometric voice service encountered an error.',
     };
   }
 };
