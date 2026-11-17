@@ -14,6 +14,7 @@ router.get('/', async (req, res) => {
   const memoryRssMb = Math.round(process.memoryUsage().rss / 1024 / 1024);
   const uptimeSeconds = Math.round(process.uptime());
   const cpuLoad = os.loadavg();
+  const load1m = Array.isArray(cpuLoad) ? cpuLoad[0] : Number(cpuLoad || 0);
 
   const isHealthy = mongoConnected && memoryRssMb < 1000;
 
@@ -30,7 +31,7 @@ router.get('/', async (req, res) => {
     resources: {
       memoryRssMb,
       memoryLimitMb: 1024,
-      cpuLoad1m: Number(cpuLoad.toFixed(2)),
+      cpuLoad1m: Number(load1m.toFixed(2)),
     },
   });
 });
