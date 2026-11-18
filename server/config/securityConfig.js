@@ -1,8 +1,11 @@
-const allowedOrigins = (process.env.CORS_ORIGINS || 'http://localhost:5173,https://yourdomain.com')
+const rawOrigins = (
+  process.env.CORS_ORIGINS ||
+  'http://localhost:5173,http://localhost:3000,https://yourdomain.com'
+)
   .split(',')
-  .map((origin) => origin.trim());
+  .map((origin) => origin.trim().replace(/\/+$/, ''))
+  .filter(Boolean);
 
-// Official Cloudflare IPv4 CIDR prefixes for WAF verification
 const cloudflareIpPrefixes = [
   '173.245.48.',
   '103.21.244.',
@@ -20,6 +23,15 @@ const cloudflareIpPrefixes = [
   '172.64.',
   '131.0.72.',
 ];
+
+const isAllowedOrigin = (origin) => {
+  if (!origin) return true;
+  if (process.env.DEV_MODE === 'true') return true;
+  const cleanOrigin = origin.trim().replace(/\/+$/, '');
+  if (rawOrigins.includes('*') || rawOrigins.includes(cleanOrigin)) return true;
+  if (/^https:\/\/[a-zA-Z0-9-]+\.onrender\.com$/.test(cleanOrigin)) return true;
+  return false;
+};
 
 const securityConfig = {
   helmetOptions: {
@@ -45,15 +57,21 @@ const securityConfig = {
 
   corsOptions: {
     origin: (origin, callback) => {
-      // Allow requests with no origin (like mobile apps or server-to-server webhooks)
-      if (!origin || allowedOrigins.includes(origin) || process.env.DEV_MODE === 'true') {
+      if (isAllowedOrigin(origin)) {
         callback(null, true);
       } else {
         callback(new Error(`CORS Policy Blocked Unauthorized Origin: ${origin}`));
       }
     },
-    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Super-Admin-Id', 'X-Super-Token', 'X-Signature'],
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: [
+      'Content-Type',
+      'Authorization',
+      'X-App-Version',
+      'X-Super-Admin-Id',
+      'X-Super-Token',
+      'X-Signature',
+    ],
     credentials: true,
     maxAge: 86400,
   },
@@ -68,14 +86,14 @@ const securityConfig = {
 
   isCloudflareProxyIp(remoteAddress) {
     if (!remoteAddress) return false;
-    const cleanIp = remoteAddress.replace('::ffff:', '');
+    const cleanIp = remoteAddress.replace(/^::ffff:/, '');
     return cloudflareIpPrefixes.some((prefix) => cleanIp.startsWith(prefix));
   },
 
   sshAndApiLockdown: {
     apiPrefixLock: '/api/v1/',
     maxFailedSuperAdminAttempts: 3,
-    autoBanDurationSeconds: 86400 * 30, // 30 Days ban
+    autoBanDurationSeconds: 86400 * 30,
     disableSshPasswordAuth: true,
   },
 };
