@@ -1,8 +1,11 @@
 const { runWallInferenceWithFallback } = require('./aiModel');
 const { calculateJobPriceAndDays } = require('../../utils/priceUtils');
 
-const inspectWallPhotoAndEstimate = async ({ imageUrl, manualSqft = 0, isMistriOnly = false }) => {
-  // 1. Run AI Inference wrapped with Self-Healing Circuit Breaker
+const inspectWallPhotoAndEstimate = async ({
+  imageUrl,
+  manualSqft = 0,
+  isMistriOnly = false,
+}) => {
   const aiOutput = await runWallInferenceWithFallback({
     imageUrl,
     fallbackSqft: manualSqft,
@@ -10,10 +13,12 @@ const inspectWallPhotoAndEstimate = async ({ imageUrl, manualSqft = 0, isMistriO
 
   const detectedSqft = Number(aiOutput.detectedSqft || manualSqft || 100);
   const confidenceScore = Number(aiOutput.confidenceScore || 0);
-  const wallProblem = aiOutput.wallProblem || ['None'];
+  const wallProblem =
+    Array.isArray(aiOutput.wallProblem) && aiOutput.wallProblem.length > 0
+      ? aiOutput.wallProblem
+      : ['None'];
   const wallDamageLevel = aiOutput.wallDamageLevel || 'Low';
 
-  // 2. Calculate Price & 450 Sqft Days based on AI/Manual findings
   const estimate = calculateJobPriceAndDays({
     sqft: detectedSqft,
     isMistriOnly,
@@ -21,8 +26,8 @@ const inspectWallPhotoAndEstimate = async ({ imageUrl, manualSqft = 0, isMistriO
     wallDamageLevel,
   });
 
-  // 3. Enforce 0.80 Confidence Score Rule
-  const needsManualReview = aiOutput.fallbackMode === true || confidenceScore < 0.80;
+  const needsManualReview =
+    aiOutput.fallbackMode === true || confidenceScore < 0.80;
 
   return {
     success: true,
