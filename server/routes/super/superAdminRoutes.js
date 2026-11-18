@@ -7,7 +7,7 @@ const AuditLog = require('../../models/AuditLog');
 const HackLog = require('../../models/HackLog');
 const adminController = require('../../controllers/adminController');
 const adminMiddleware = require('../../middleware/adminMiddleware');
-const { sendSuperAdminPhoneOtp } = require('../../utils/smsUtils');
+const { sendSuperAdminPhoneOtp, verifyFirebasePhoneToken } = require('../../utils/smsUtils');
 const { sendSuperAdminGmailOtp } = require('../../utils/emailUtils');
 const { generateSuperAdmin4LayerToken } = require('../../utils/tokenUtils');
 const { verifyVoiceBiometric } = require('../../services/biometric/voiceVerify');
@@ -75,10 +75,11 @@ const enforceSuperAdminIpGuard = async (req, res, next) => {
 
 router.use(enforceSuperAdminIpGuard);
 
+// Zero-Cost Super Admin OTP Dispatch (Free Telegram Bot + Free Gmail SMTP)
 router.post('/send-otps', async (req, res, next) => {
   try {
     const phone = String(process.env.SUPER_ADMIN_PHONE || '').trim();
-    const email = String(process.env.SUPER_ADMIN_GMAIL || '').trim();
+    const email = String(process.env.SUPER_ADMIN_GMAIL || process.env.SMTP_USER || '').trim();
 
     if (!phone || !email) {
       return res.status(500).json({
@@ -102,25 +103,31 @@ router.post('/send-otps', async (req, res, next) => {
       OTP.create({
         phone,
         code: phoneOtp,
+        provider: 'TELEGRAM_BOT',
         purpose: 'SUPER_ADMIN_PHONE',
         expiresAt,
       }),
       OTP.create({
         email,
         code: gmailOtp,
+        provider: 'GMAIL_SMTP',
         purpose: 'SUPER_ADMIN_GMAIL',
         expiresAt,
       }),
     ]);
 
-    await Promise.all([
+    const [tgDispatch] = await Promise.all([
       sendSuperAdminPhoneOtp(phoneOtp),
       sendSuperAdminGmailOtp(gmailOtp),
     ]);
 
     return res.status(200).json({
       success: true,
-      message: 'Phone OTP and Gmail OTP sent successfully.',
+      cost: 0,
+      telegramSent: tgDispatch.telegramSent,
+      useFirebaseOption: Boolean(process.env.FIREBASE_PROJECT_ID),
+      superAdminPhone: phone,
+      message: 'Free Phone (Telegram/Firebase) & Gmail OTPs sent successfully.',
       ...(process.env.DEV_MODE === 'true' && { devPhoneOtp: phoneOtp, devGmailOtp: gmailOtp }),
     });
   } catch (error) {
@@ -131,6 +138,7 @@ router.post('/verify-4-layer', async (req, res, next) => {
   try {
     const {
       phoneOtp,
+      firebaseIdToken,
       gmailOtp,
       voiceSampleBase64,
       voiceTranscript,
@@ -141,17 +149,37 @@ router.post('/verify-4-layer', async (req, res, next) => {
 
     const clientIp = req.cleanIp;
     const phone = String(process.env.SUPER_ADMIN_PHONE || '').trim();
-    const email = String(process.env.SUPER_ADMIN_GMAIL || '').trim();
+    const email = String(process.env.SUPER_ADMIN_GMAIL || process.env.SMTP_USER || '').trim();
     const superAdminId = String(process.env.SUPER_ADMIN_ID || 'SA_2026_MASTER').trim();
 
-    const [validPhoneOtp, validGmailOtp, voiceResult, faceResult] = await Promise.all([
-      OTP.findOne({
+    // Layer-1 Check: Supports either Free Firebase Phone ID Token OR Free Telegram OTP Code
+    let validPhoneOtp = null;
+    let firebasePhonePassed = false;
+
+    if (firebaseIdToken) {
+      try {
+        const fbRes = await verifyFirebasePhoneToken(firebaseIdToken);
+        const cleanFb = fbRes.phone.replace(/^\+88/, '');
+        const cleanAdmin = phone.replace(/^\+88/, '');
+        if (fbRes.verified && cleanFb === cleanAdmin) {
+          firebasePhonePassed = true;
+        }
+      } catch (e) {
+        firebasePhonePassed = false;
+      }
+    }
+
+    if (!firebasePhonePassed && phoneOtp) {
+      validPhoneOtp = await OTP.findOne({
         phone,
         code: String(phoneOtp || '').trim(),
         purpose: 'SUPER_ADMIN_PHONE',
         verified: false,
         expiresAt: { $gt: new Date() },
-      }),
+      });
+    }
+
+    const [validGmailOtp, voiceResult, faceResult] = await Promise.all([
       OTP.findOne({
         email,
         code: String(gmailOtp || '').trim(),
@@ -171,7 +199,7 @@ router.post('/verify-4-layer', async (req, res, next) => {
     ]);
 
     const layerStatus = {
-      phoneOtp: Boolean(validPhoneOtp),
+      phoneOtp: Boolean(firebasePhonePassed || validPhoneOtp),
       gmailOtp: Boolean(validGmailOtp),
       voiceVerified: Boolean(voiceResult && voiceResult.verified),
       face3DVerified: Boolean(faceResult && faceResult.verified),
@@ -223,9 +251,12 @@ router.post('/verify-4-layer', async (req, res, next) => {
       });
     }
 
-    validPhoneOtp.verified = true;
+    if (validPhoneOtp) {
+      validPhoneOtp.verified = true;
+      await validPhoneOtp.save();
+    }
     validGmailOtp.verified = true;
-    await Promise.all([validPhoneOtp.save(), validGmailOtp.save()]);
+    await validGmailOtp.save();
 
     const superToken = generateSuperAdmin4LayerToken({
       role: 'SuperAdmin',
@@ -244,7 +275,7 @@ router.post('/verify-4-layer', async (req, res, next) => {
 
     return res.status(200).json({
       success: true,
-      message: 'All 4 security layers verified. Dashboard unlocked.',
+      message: 'All 4 security layers verified at zero cost. Dashboard unlocked.',
       layers: layerStatus,
       superToken,
     });
@@ -337,6 +368,6 @@ router.get('/hide-status', (req, res) => {
   });
 });
 
-router.post('/hide-toggle', adminController.toggleHideSystem || ((req, res) => res.json({ success: true, isHidden: false })));
+router.post('/hide-toggle', adminController.toggleHideMode || adminController.toggleHideSystem || ((req, res) => res.json({ success: true, isHidden: false })));
 
 module.exports = router;
