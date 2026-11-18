@@ -1,38 +1,12 @@
 const jwt = require('jsonwebtoken');
-const hideConfig = require('../config/hideConfig');
 const AuditLog = require('../models/AuditLog');
 
-// 1. Hide State Gate: Blocks discovery when Hide Mode is ON unless ID + IP + Token match
 const checkHideState = (req, res, next) => {
-  if (!hideConfig.isHidden()) {
-    return next();
-  }
-
-  const adminId = req.headers['x-super-admin-id'] || req.query.adminId;
-  const secretToken = req.headers['x-super-token'] || req.headers.authorization?.split(' ')[1];
-  const clientIp = req.clientIp || req.ip;
-
-  const allowed = hideConfig.canSeeHidden({
-    adminId,
-    clientIp,
-    secretToken,
-  });
-
-  if (!allowed) {
-    // Return 404 to completely conceal the existence of the route
-    return res.status(404).json({
-      success: false,
-      message: 'Route not found',
-    });
-  }
-
-  next();
+  return next();
 };
 
-// 2. Super Admin Backdoor & 4-Layer Verification Gate
 const superAdminGate = async (req, res, next) => {
   try {
-    // Allow initial verification endpoints (sending OTP, verifying 4 layers, hardware recovery)
     const openVerifyPaths = [
       '/send-otps',
       '/verify-4-layer',
@@ -54,10 +28,11 @@ const superAdminGate = async (req, res, next) => {
     const token = authHeader.split(' ')[1];
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
-    // Strictly verify all 4 layers (Phone OTP + Gmail OTP + Live Voice + Live 3D Face)
+    const configuredAdminId = (process.env.SUPER_ADMIN_ID || '').trim();
     const is4LayerGreen =
       decoded.role === 'SuperAdmin' &&
-      decoded.superAdminId === process.env.SUPER_ADMIN_ID &&
+      Boolean(configuredAdminId) &&
+      decoded.superAdminId === configuredAdminId &&
       decoded.layers?.phoneOtp === true &&
       decoded.layers?.gmailOtp === true &&
       decoded.layers?.voiceVerified === true &&
@@ -71,7 +46,7 @@ const superAdminGate = async (req, res, next) => {
         category: 'BIOMETRIC_FAIL',
         ipAddress: req.clientIp || req.ip,
         details: { path: req.originalUrl },
-      });
+      }).catch(() => {});
 
       return res.status(403).json({
         success: false,
