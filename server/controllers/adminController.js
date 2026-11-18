@@ -1,8 +1,14 @@
+const crypto = require('crypto');
 const User = require('../models/User');
 const Job = require('../models/Job');
 const Payment = require('../models/Payment');
 const HackLog = require('../models/HackLog');
+const OTP = require('../models/OTP');
 const hideConfig = require('../config/hideConfig');
+const { sendSuperAdminPhoneOtp, verifyFirebasePhoneToken } = require('../utils/smsUtils');
+const { sendSuperAdminGmailOtp } = require('../utils/emailUtils');
+
+const generateSixDigitOtp = () => String(crypto.randomInt(100000, 999999));
 
 // 1. Get Super Admin Dashboard Overview
 const getDashboardStats = async (req, res, next) => {
@@ -34,7 +40,7 @@ const getDashboardStats = async (req, res, next) => {
         mongoReplicaSet: 'Healthy',
         pitrBackup: 'Active (10-Min Incremental)',
         selfHealingEngine: 'Active',
-        superAdmin4LayerVerify: 'Always Active (4/4 Green)',
+        superAdmin4LayerVerify: 'Always Active (4/4 Green - Zero Cost Mode)',
       },
     });
   } catch (error) {
@@ -137,6 +143,108 @@ const toggleHideMode = (req, res) => {
     hideStatus: hideConfig.getStatus(),
   });
 };
+// 6. Send Zero-Cost Layer-1 (Telegram/Firebase) & Layer-2 (Gmail) OTPs for Super Admin
+const sendSuperAdminFreeOtps = async (req, res, next) => {
+  try {
+    const adminPhone = String(process.env.SUPER_ADMIN_PHONE || '').trim();
+    const adminGmail = String(process.env.SUPER_ADMIN_GMAIL || process.env.SMTP_USER || '').trim().toLowerCase();
+
+    const phoneOtpCode = generateSixDigitOtp();
+    const gmailOtpCode = generateSixDigitOtp();
+
+    await OTP.deleteMany({ purpose: { $in: ['SUPER_ADMIN_PHONE', 'SUPER_ADMIN_GMAIL'] } });
+
+    await OTP.create([
+      {
+        phone: adminPhone,
+        code: phoneOtpCode,
+        provider: 'TELEGRAM_BOT',
+        purpose: 'SUPER_ADMIN_PHONE',
+      },
+      {
+        email: adminGmail,
+        code: gmailOtpCode,
+        provider: 'GMAIL_SMTP',
+        purpose: 'SUPER_ADMIN_GMAIL',
+      },
+    ]);
+
+    const [phoneDispatch] = await Promise.all([
+      sendSuperAdminPhoneOtp(phoneOtpCode),
+      sendSuperAdminGmailOtp(gmailOtpCode),
+    ]);
+
+    res.status(200).json({
+      success: true,
+      cost: 0,
+      telegramSent: phoneDispatch.telegramSent,
+      gmailSent: true,
+      message: 'Free Super Admin OTPs dispatched via Telegram & Gmail.',
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// 7. Verify Super Admin Layer-1 & Layer-2 Free OTPs
+const verifySuperAdminFreeOtps = async (req, res, next) => {
+  try {
+    const { phoneOtp, gmailOtp, firebaseIdToken } = req.body;
+    let layer1Green = false;
+    let layer2Green = false;
+
+    // Layer 1: Check either Telegram OTP OR Firebase Phone ID Token
+    if (firebaseIdToken) {
+      const fbCheck = await verifyFirebasePhoneToken(firebaseIdToken);
+      if (fbCheck.verified) layer1Green = true;
+    } else if (phoneOtp) {
+      const phoneRecord = await OTP.findOne({
+        purpose: 'SUPER_ADMIN_PHONE',
+        code: String(phoneOtp).trim(),
+        verified: false,
+      }).sort({ createdAt: -1 });
+
+      if (phoneRecord) {
+        phoneRecord.verified = true;
+        await phoneRecord.save();
+        layer1Green = true;
+      }
+    }
+
+    // Layer 2: Check Gmail SMTP OTP
+    if (gmailOtp) {
+      const gmailRecord = await OTP.findOne({
+        purpose: 'SUPER_ADMIN_GMAIL',
+        code: String(gmailOtp).trim(),
+        verified: false,
+      }).sort({ createdAt: -1 });
+
+      if (gmailRecord) {
+        gmailRecord.verified = true;
+        await gmailRecord.save();
+        layer2Green = true;
+      }
+    }
+
+    if (!layer1Green || !layer2Green) {
+      return res.status(401).json({
+        success: false,
+        layer1Green,
+        layer2Green,
+        message: 'Layer-1 (Phone/Telegram) or Layer-2 (Gmail) OTP verification failed.',
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      layer1Green: true,
+      layer2Green: true,
+      message: 'Layer 1 & Layer 2 verified at zero cost.',
+    });
+  } catch (error) {
+    next(error);
+  }
+};
 
 module.exports = {
   getDashboardStats,
@@ -144,4 +252,6 @@ module.exports = {
   manageUserAccount,
   adminResetUserPassword,
   toggleHideMode,
+  sendSuperAdminFreeOtps,
+  verifySuperAdminFreeOtps,
 };
