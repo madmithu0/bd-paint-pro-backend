@@ -65,3 +65,58 @@ Required JSON keys:
       timeout: 15000,
     }
   );
+  const rawText = response.data?.candidates?.[0]?.content?.parts?.[0]?.text;
+  if (!rawText) {
+    throw new Error('Empty response from Gemini Vision API');
+  }
+
+  const cleanJson = rawText.replace(/```json|```/g, '').trim();
+  const parsed = JSON.parse(cleanJson);
+
+  const allowedProblems = ['Nona', 'Damp', 'Fatol', 'None'];
+  const validProblems = Array.isArray(parsed.wallProblem)
+    ? parsed.wallProblem.filter((p) => allowedProblems.includes(p))
+    : ['None'];
+
+  const allowedLevels = ['Low', 'Medium', 'High'];
+  const validDamageLevel = allowedLevels.includes(parsed.wallDamageLevel)
+    ? parsed.wallDamageLevel
+    : 'Low';
+
+  return {
+    fallbackMode: false,
+    modelVersion: AI_MODEL_VERSION_LOCK,
+    detectedSqft: Math.max(10, Number(parsed.detectedSqft) || 100),
+    wallProblem: validProblems.length > 0 ? validProblems : ['None'],
+    wallDamageLevel: validDamageLevel,
+    confidenceScore: Math.min(1, Math.max(0, Number(parsed.confidenceScore) || 0)),
+  };
+};
+
+const modelCircuitBreaker = new CircuitBreaker(executeModelInference, {
+  timeout: 16000,
+  errorThresholdPercentage: 50,
+  resetTimeout: 15000,
+});
+
+modelCircuitBreaker.fallback((params, err) => {
+  const safeSqft = Number(params?.fallbackSqft) || 0;
+  console.warn(`[AI SELF-HEALING FALLBACK] ${err?.message || 'Service unavailable'}`);
+  return {
+    fallbackMode: true,
+    modelVersion: AI_MODEL_VERSION_LOCK,
+    detectedSqft: safeSqft,
+    wallProblem: ['None'],
+    wallDamageLevel: 'Low',
+    confidenceScore: 0,
+  };
+});
+
+const runWallInferenceWithFallback = async ({ imageUrl, fallbackSqft = 0 }) => {
+  return modelCircuitBreaker.fire({ imageUrl, fallbackSqft });
+};
+
+module.exports = {
+  AI_MODEL_VERSION_LOCK,
+  runWallInferenceWithFallback,
+};
