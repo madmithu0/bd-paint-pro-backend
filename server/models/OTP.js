@@ -17,7 +17,16 @@ const otpSchema = new mongoose.Schema(
     },
     code: {
       type: String,
-      required: true,
+      default: null, // Optional when verified directly via Firebase ID Token
+    },
+    provider: {
+      type: String,
+      enum: ['FIREBASE_PHONE', 'GMAIL_SMTP', 'TELEGRAM_BOT', 'LOCAL'],
+      default: 'GMAIL_SMTP',
+    },
+    firebaseUid: {
+      type: String,
+      default: null,
     },
     purpose: {
       type: String,
