@@ -1,11 +1,11 @@
-const HIDE_AFTER_MINUTES = Number(process.env.HIDE_AFTER_MINUTES) || 5;
+const HIDE_AFTER_MINUTES = 0;
 const DEV_MODE = process.env.DEV_MODE === 'true';
 
-let hideState = {
+const hideState = {
   isHidden: false,
-  autoHideEnabled: true,
+  autoHideEnabled: false,
   bootTimestamp: Date.now(),
-  autoHideTriggerAt: Date.now() + HIDE_AFTER_MINUTES * 60 * 1000,
+  autoHideTriggerAt: null,
   logs: [],
 };
 
@@ -15,7 +15,7 @@ const addHideLog = (action, actorIp, reason) => {
   hideState.logs.unshift({
     action,
     actorIp: actorIp || 'SYSTEM',
-    reason,
+    reason: reason || 'System state update',
     timestamp: new Date().toISOString(),
   });
   if (hideState.logs.length > 100) {
@@ -25,64 +25,65 @@ const addHideLog = (action, actorIp, reason) => {
 
 const hideConfig = {
   startAutoHideTimer() {
-    if (DEV_MODE) {
-      console.log('👁️  [HIDE SYSTEM] DEV_MODE is true — Auto-Hide timer paused.');
-      return;
+    if (autoHideTimeoutRef) {
+      clearTimeout(autoHideTimeoutRef);
+      autoHideTimeoutRef = null;
     }
-
-    if (autoHideTimeoutRef) clearTimeout(autoHideTimeoutRef);
-
+    hideState.autoHideEnabled = false;
+    hideState.isHidden = false;
     hideState.bootTimestamp = Date.now();
-    hideState.autoHideTriggerAt = hideState.bootTimestamp + HIDE_AFTER_MINUTES * 60 * 1000;
-
-    autoHideTimeoutRef = setTimeout(() => {
-      if (hideState.autoHideEnabled && !hideState.isHidden) {
-        hideState.isHidden = true;
-        addHideLog('AUTO_HIDE_ON', 'SYSTEM_TIMER', `Auto-hidden after ${HIDE_AFTER_MINUTES} minutes of boot`);
-        console.log(`🔒 [HIDE SYSTEM] Super Admin interface is now HIDDEN (${HIDE_AFTER_MINUTES} min elapsed).`);
-      }
-    }, HIDE_AFTER_MINUTES * 60 * 1000);
+    hideState.autoHideTriggerAt = null;
+    console.log('[HIDE SYSTEM] Auto-Hide timer is permanently disabled.');
   },
 
   setHideStatus(status, actorIp = 'SUPER_ADMIN', reason = 'Manual toggle') {
     hideState.isHidden = Boolean(status);
-    addHideLog(hideState.isHidden ? 'MANUAL_HIDE_ON' : 'MANUAL_UNHIDE', actorIp, reason);
+    addHideLog(
+      hideState.isHidden ? 'MANUAL_HIDE_ON' : 'MANUAL_UNHIDE',
+      actorIp,
+      reason
+    );
     return hideState.isHidden;
   },
 
-  toggleAutoHide(enabled) {
-    hideState.autoHideEnabled = Boolean(enabled);
-    if (hideState.autoHideEnabled && !hideState.isHidden) {
-      this.startAutoHideTimer();
+  toggleAutoHide() {
+    if (autoHideTimeoutRef) {
+      clearTimeout(autoHideTimeoutRef);
+      autoHideTimeoutRef = null;
     }
-    return hideState.autoHideEnabled;
+    hideState.autoHideEnabled = false;
+    return false;
   },
 
   isHidden() {
-    if (DEV_MODE) return false;
-    return hideState.isHidden;
+    return Boolean(hideState.isHidden);
   },
 
-  // Can only view hidden interface if Super Admin ID + Whitelisted IP + Valid Secret Header/Token match
-  canSeeHidden({ adminId, clientIp, secretToken }) {
+  canSeeHidden(params = {}) {
     if (!this.isHidden()) return true;
 
-    const validId = process.env.SUPER_ADMIN_ID && adminId === process.env.SUPER_ADMIN_ID;
-    const allowedIps = (process.env.SUPER_ADMIN_IP || '').split(',').map((ip) => ip.trim());
-    const validIp = allowedIps.includes(clientIp);
-    const validToken = Boolean(secretToken && secretToken.length >= 20);
+    const { adminId, clientIp, secretToken } = params;
+    const configuredAdminId = (process.env.SUPER_ADMIN_ID || '').trim();
+    const validId = Boolean(configuredAdminId && adminId === configuredAdminId);
 
-    return Boolean(validId && validIp && validToken);
+    const rawIps = (process.env.SUPER_ADMIN_IP || '').trim();
+    const allowedIps = rawIps
+      ? rawIps.split(',').map((ip) => ip.trim()).filter(Boolean)
+      : [];
+    const validIp = allowedIps.length === 0 || allowedIps.includes(String(clientIp || '').trim());
+
+    const validToken = typeof secretToken === 'string' && secretToken.trim().length >= 20;
+
+    return validId && validIp && validToken;
   },
 
   getStatus() {
-    const remainingMs = Math.max(0, hideState.autoHideTriggerAt - Date.now());
     return {
       isHidden: this.isHidden(),
-      autoHideEnabled: hideState.autoHideEnabled,
+      autoHideEnabled: false,
       devMode: DEV_MODE,
       hideAfterMinutes: HIDE_AFTER_MINUTES,
-      remainingSeconds: hideState.isHidden ? 0 : Math.ceil(remainingMs / 1000),
+      remainingSeconds: 0,
       recentLogs: hideState.logs.slice(0, 20),
     };
   },
