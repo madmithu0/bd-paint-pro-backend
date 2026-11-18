@@ -23,7 +23,6 @@ const safeRequire = (modulePath, fallback = null) => {
 
 const connectDB = require('./db');
 const paymentConfig = safeRequire('./config/paymentConfig', { validateConfig: () => true });
-const hideConfig = safeRequire('./config/hideConfig', { startAutoHideTimer: () => {} });
 const securityConfig = safeRequire('./config/securityConfig', { helmetOptions: {}, corsOptions: {} });
 
 const { initAutoBackup } = safeRequire('./utils/backupUtils', { initAutoBackup: () => {} });
@@ -34,9 +33,6 @@ const { initSelfHealing } = safeRequire('./infra/selfHealingEngine', { initSelfH
 const healthCheckRouter = safeRequire('./infra/healthCheck', express.Router());
 
 const { verifyToken } = safeRequire('./middleware/authMiddleware', { verifyToken: (req, res, next) => next() });
-const { checkHideState } = safeRequire('./middleware/adminMiddleware', {
-  checkHideState: (req, res, next) => next(),
-});
 const { checkKillSwitch } = safeRequire('./middleware/killMiddleware', { checkKillSwitch: (req, res, next) => next() });
 const { auditLogger } = safeRequire('./middleware/auditMiddleware', { auditLogger: (req, res, next) => next() });
 const { globalRateLimiter } = safeRequire('./middleware/rateLimitMiddleware', { globalRateLimiter: (req, res, next) => next() });
@@ -48,7 +44,13 @@ const { globalErrorHandler, notFoundHandler } = safeRequire('./middleware/errorM
 const APP_VERSION = 'v3.0.0';
 const ARCHITECTURE_LOCK = 'SELF-HEALING LOCK';
 const API_PREFIX = '/api/v1';
-const SECRET_SUPER_ROUTE = process.env.SUPER_ADMIN_ROUTE || process.env.SUPER_ADMIN_SECRET_ROUTE || '/x9-super-2026';
+
+const rawSuperRoute = (
+  process.env.SUPER_ADMIN_ROUTE ||
+  process.env.SUPER_ADMIN_SECRET_ROUTE ||
+  '/x9-super-2026'
+).trim();
+const SECRET_SUPER_ROUTE = rawSuperRoute.startsWith('/') ? rawSuperRoute : `/${rawSuperRoute}`;
 
 if (process.env.APP_VERSION && process.env.APP_VERSION !== APP_VERSION) {
   console.error(`[FATAL] Version Lock Mismatch! Expected ${APP_VERSION}, found ${process.env.APP_VERSION}`);
@@ -57,7 +59,6 @@ if (process.env.APP_VERSION && process.env.APP_VERSION !== APP_VERSION) {
 
 const app = express();
 const server = http.createServer(app);
-
 if (process.env.SENTRY_DSN) {
   Sentry.init({
     dsn: process.env.SENTRY_DSN,
@@ -95,7 +96,8 @@ app.locals.systemConfig = {
     platformNoAgent: 0.20,
   },
   superAdmin4LayerActive: true,
-  hideAfterMinutes: Number(process.env.HIDE_AFTER_MINUTES) || 5,
+  hideAfterMinutes: 0,
+  autoHideEnabled: false,
 };
 
 app.use(helmet(securityConfig.helmetOptions));
@@ -109,7 +111,7 @@ app.use(hpp());
 app.use((req, res, next) => {
   const cfRay = req.headers['cf-ray'];
   const rawIp = req.headers['cf-connecting-ip'] || req.ip || '';
-  const clientIp = String(rawIp).replace(/^::ffff:/, '');
+  const clientIp = String(rawIp).replace(/^::ffff:/, '').trim();
   req.clientIp = clientIp;
   req.cfRay = cfRay || 'LOCAL-DEV';
 
@@ -139,7 +141,6 @@ paymentWebhookRouter.post('/nagad/callback', verifyHmacSignature, (req, res, nex
   res.status(200).json({ status: 'Webhook endpoint ready' });
 });
 app.use(`${API_PREFIX}/webhooks`, paymentWebhookRouter);
-
 const failedSuperAdminAttempts = new Map();
 
 const superAdminIpGuard = async (req, res, next) => {
@@ -161,7 +162,6 @@ const superAdminRoutes = safeRequire('./routes/super/superAdminRoutes', express.
 app.use(
   `${API_PREFIX}${SECRET_SUPER_ROUTE}`,
   superAdminIpGuard,
-  checkHideState,
   superAdminRoutes
 );
 
@@ -215,7 +215,6 @@ const startServer = async () => {
     await connectDB();
 
     if (paymentConfig.validateConfig) paymentConfig.validateConfig();
-    if (hideConfig.startAutoHideTimer) hideConfig.startAutoHideTimer();
     if (initSelfHealing) initSelfHealing(server);
 
     if (isPrimaryClusterInstance) {
