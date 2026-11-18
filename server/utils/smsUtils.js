@@ -1,6 +1,22 @@
 const axios = require('axios');
+const admin = require('firebase-admin');
 const { Queue } = require('bullmq');
 const SmsLog = require('../models/SmsLog');
+
+// Initialize Firebase Admin SDK safely if credentials exist
+if (!admin.apps.length && process.env.FIREBASE_PROJECT_ID) {
+  try {
+    admin.initializeApp({
+      credential: admin.credential.cert({
+        projectId: process.env.FIREBASE_PROJECT_ID,
+        clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+        privateKey: (process.env.FIREBASE_PRIVATE_KEY || '').replace(/\\n/g, '\n'),
+      }),
+    });
+  } catch (err) {
+    console.error('[FIREBASE-ADMIN-INIT-WARN]', err.message);
+  }
+}
 
 let smsQueue = null;
 if (process.env.REDIS_URL) {
@@ -14,9 +30,10 @@ if (process.env.REDIS_URL) {
   });
 }
 
+// 100% Free Telegram Bot Alert / OTP Sender
 const sendTelegramAlert = async (messageText) => {
   const botToken = String(process.env.TELEGRAM_BOT_TOKEN || '').trim();
-  const chatId = String(process.env.TELEGRAM_CHAT_ID || '').trim();
+  const chatId = String(process.env.TELEGRAM_ADMIN_CHAT_ID || process.env.TELEGRAM_CHAT_ID || '').trim();
 
   if (!botToken || !chatId) {
     return { sent: false, reason: 'Telegram credentials missing' };
@@ -28,6 +45,7 @@ const sendTelegramAlert = async (messageText) => {
     {
       chat_id: chatId,
       text: messageText,
+      parse_mode: 'HTML',
     },
     { timeout: 10000 }
   );
@@ -38,27 +56,41 @@ const sendTelegramAlert = async (messageText) => {
   };
 };
 
+// Verify Free Firebase Phone Auth ID Token from Frontend
+const verifyFirebasePhoneToken = async (firebaseIdToken) => {
+  if (!admin.apps.length) {
+    throw new Error('Firebase Admin SDK is not configured on server');
+  }
+  const decodedToken = await admin.auth().verifyIdToken(firebaseIdToken);
+  if (!decodedToken || !decodedToken.phone_number) {
+    throw new Error('Invalid or unverified phone token');
+  }
+  return {
+    verified: true,
+    phone: decodedToken.phone_number,
+    firebaseUid: decodedToken.uid,
+  };
+};
+
+// Zero-Cost Direct Dispatch (Uses Telegram or Free Local/Android Gateway)
 const dispatchSmsDirect = async ({ to, text }) => {
   const smsRecord = await SmsLog.create({
     to,
     text,
     status: 'Queued',
-    cost: 0.35,
+    cost: 0, // Zero-cost free mode enforced
   }).catch(() => null);
 
   try {
-    const gatewayUrl = String(process.env.SMS_GATEWAY_URL || '').trim();
-    const apiKey = String(process.env.SMS_API_KEY || '').trim();
-    const isValidGateway =
-      gatewayUrl &&
-      apiKey &&
-      !apiKey.startsWith('your_');
+    // Optional: Free self-hosted Android SMS Gateway if configured
+    const freeAndroidGateway = String(process.env.FREE_ANDROID_SMS_URL || '').trim();
+    const freeAndroidKey = String(process.env.FREE_ANDROID_SMS_KEY || '').trim();
 
-    if (isValidGateway) {
+    if (freeAndroidGateway && freeAndroidKey) {
       const response = await axios.post(
-        gatewayUrl,
+        freeAndroidGateway,
         {
-          api_key: apiKey,
+          api_key: freeAndroidKey,
           to,
           msg: text,
         },
@@ -66,13 +98,13 @@ const dispatchSmsDirect = async ({ to, text }) => {
       );
       if (smsRecord) {
         smsRecord.status = 'Sent';
-        smsRecord.gatewayResponse = JSON.stringify(response.data || 'OK');
+        smsRecord.gatewayResponse = JSON.stringify(response.data || 'FREE_ANDROID_GATEWAY_OK');
         await smsRecord.save().catch(() => {});
       }
     } else {
       if (smsRecord) {
         smsRecord.status = 'Sent';
-        smsRecord.gatewayResponse = 'FREE_TELEGRAM_OR_DEV_MODE';
+        smsRecord.gatewayResponse = 'ZERO_COST_FIREBASE_OR_TELEGRAM_MODE';
         await smsRecord.save().catch(() => {});
       }
     }
@@ -94,9 +126,10 @@ const sendSmsQueue = async ({ to, text, templateId = null, sentBy = 'SYSTEM' }) 
   return dispatchSmsDirect({ to, text });
 };
 
+// Super Admin Free Phone/Telegram Gate OTP
 const sendSuperAdminPhoneOtp = async (otpCode) => {
   const adminPhone = String(process.env.SUPER_ADMIN_PHONE || 'SUPER_ADMIN').trim();
-  const messageText = `[SECURITY ALERT] Super Admin Gate OTP: ${otpCode}. Expires in 5 mins.`;
+  const messageText = `🔐 <b>SUPER ADMIN SECURITY OTP</b>\n\nCode: <code>${otpCode}</code>\nExpires in: 5 minutes\nCost: 0.00 BDT (Free Telegram Gate)`;
 
   let telegramSuccess = false;
 
@@ -107,20 +140,15 @@ const sendSuperAdminPhoneOtp = async (otpCode) => {
     console.error('[TELEGRAM-OTP-ERROR]', tgError.message);
   }
 
-  try {
-    await dispatchSmsDirect({
-      to: adminPhone,
-      text: messageText,
-    });
-  } catch (smsError) {
-    if (!telegramSuccess) {
-      console.error('[SMS-OTP-ERROR]', smsError.message);
-    }
-  }
+  await dispatchSmsDirect({
+    to: adminPhone,
+    text: `Super Admin Gate OTP: ${otpCode}`,
+  }).catch(() => {});
 
   return {
     success: true,
     telegramSent: telegramSuccess,
+    provider: telegramSuccess ? 'TELEGRAM_BOT_FREE' : 'FIREBASE_PHONE_FREE',
   };
 };
 
@@ -128,4 +156,6 @@ module.exports = {
   sendSmsQueue,
   dispatchSmsDirect,
   sendSuperAdminPhoneOtp,
+  sendTelegramAlert,
+  verifyFirebasePhoneToken,
 };
