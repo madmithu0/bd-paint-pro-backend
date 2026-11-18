@@ -1,91 +1,42 @@
-const HIDE_AFTER_MINUTES = Number(process.env.HIDE_AFTER_MINUTES) || 5;
-const DEV_MODE = process.env.DEV_MODE === 'true';
+const paymentConfig = {
+  versionLock: 'v3.0.0-PAYMENT-LOCK',
 
-let hideState = {
-  isHidden: false,
-  autoHideEnabled: true,
-  bootTimestamp: Date.now(),
-  autoHideTriggerAt: Date.now() + HIDE_AFTER_MINUTES * 60 * 1000,
-  logs: [],
-};
-
-let autoHideTimeoutRef = null;
-
-const addHideLog = (action, actorIp, reason) => {
-  hideState.logs.unshift({
-    action,
-    actorIp: actorIp || 'SYSTEM',
-    reason,
-    timestamp: new Date().toISOString(),
-  });
-  if (hideState.logs.length > 100) {
-    hideState.logs.pop();
-  }
-};
-
-const hideConfig = {
-  startAutoHideTimer() {
-    if (DEV_MODE) {
-      console.log('👁️  [HIDE SYSTEM] DEV_MODE is true — Auto-Hide timer paused.');
-      return;
-    }
-
-    if (autoHideTimeoutRef) clearTimeout(autoHideTimeoutRef);
-
-    hideState.bootTimestamp = Date.now();
-    hideState.autoHideTriggerAt = hideState.bootTimestamp + HIDE_AFTER_MINUTES * 60 * 1000;
-
-    autoHideTimeoutRef = setTimeout(() => {
-      if (hideState.autoHideEnabled && !hideState.isHidden) {
-        hideState.isHidden = true;
-        addHideLog('AUTO_HIDE_ON', 'SYSTEM_TIMER', `Auto-hidden after ${HIDE_AFTER_MINUTES} minutes of boot`);
-        console.log(`🔒 [HIDE SYSTEM] Super Admin interface is now HIDDEN (${HIDE_AFTER_MINUTES} min elapsed).`);
-      }
-    }, HIDE_AFTER_MINUTES * 60 * 1000);
+  // bKash Live/Sandbox Gateway Configuration
+  bkash: {
+    baseUrl: process.env.BKASH_BASE_URL || 'https://bka.sh',
+    appKey: process.env.BKASH_APP_KEY || '',
+    appSecret: process.env.BKASH_APP_SECRET || '',
+    username: process.env.BKASH_USERNAME || '',
+    password: process.env.BKASH_PASSWORD || '',
+    callbackUrl: process.env.BKASH_CALLBACK_URL || '',
   },
 
-  setHideStatus(status, actorIp = 'SUPER_ADMIN', reason = 'Manual toggle') {
-    hideState.isHidden = Boolean(status);
-    addHideLog(hideState.isHidden ? 'MANUAL_HIDE_ON' : 'MANUAL_UNHIDE', actorIp, reason);
-    return hideState.isHidden;
+  // Nagad Live/Sandbox Gateway Configuration
+  nagad: {
+    baseUrl: process.env.NAGAD_BASE_URL || 'http://mynagad.com',
+    merchantId: process.env.NAGAD_MERCHANT_ID || '',
+    merchantNumber: process.env.NAGAD_MERCHANT_NUMBER || '',
+    publicKey: process.env.NAGAD_PUBLIC_KEY || '',
+    privateKey: process.env.NAGAD_PRIVATE_KEY || '',
+    callbackUrl: process.env.NAGAD_CALLBACK_URL || '',
   },
 
-  toggleAutoHide(enabled) {
-    hideState.autoHideEnabled = Boolean(enabled);
-    if (hideState.autoHideEnabled && !hideState.isHidden) {
-      this.startAutoHideTimer();
-    }
-    return hideState.autoHideEnabled;
+  // ZERO-COST FREE OTP & NOTIFICATION CONFIGURATION (Replaces Paid SMS Gateway)
+  freeOtpConfig: {
+    enabled: true,
+    paidSmsGatewayDisabled: true,
+    phoneProvider: 'FIREBASE_FREE_TIER', // 10,000 Free Phone OTPs/month
+    emailProvider: 'GMAIL_SMTP_FREE',     // 500 Free Gmail OTPs/day via Nodemailer
+    superAdminBackupProvider: 'TELEGRAM_BOT_FREE', // Unlimited Free Telegram OTP
+    telegramBotToken: process.env.TELEGRAM_BOT_TOKEN || '',
+    telegramAdminChatId: process.env.TELEGRAM_ADMIN_CHAT_ID || '',
   },
 
-  isHidden() {
-    if (DEV_MODE) return false;
-    return hideState.isHidden;
-  },
-
-  // Can only view hidden interface if Super Admin ID + Whitelisted IP + Valid Secret Header/Token match
-  canSeeHidden({ adminId, clientIp, secretToken }) {
-    if (!this.isHidden()) return true;
-
-    const validId = process.env.SUPER_ADMIN_ID && adminId === process.env.SUPER_ADMIN_ID;
-    const allowedIps = (process.env.SUPER_ADMIN_IP || '').split(',').map((ip) => ip.trim());
-    const validIp = allowedIps.includes(clientIp);
-    const validToken = Boolean(secretToken && secretToken.length >= 20);
-
-    return Boolean(validId && validIp && validToken);
-  },
-
-  getStatus() {
-    const remainingMs = Math.max(0, hideState.autoHideTriggerAt - Date.now());
-    return {
-      isHidden: this.isHidden(),
-      autoHideEnabled: hideState.autoHideEnabled,
-      devMode: DEV_MODE,
-      hideAfterMinutes: HIDE_AFTER_MINUTES,
-      remainingSeconds: hideState.isHidden ? 0 : Math.ceil(remainingMs / 1000),
-      recentLogs: hideState.logs.slice(0, 20),
-    };
+  // SSL & Hosting Security Lock
+  hosting: {
+    sslDomain: process.env.SSL_DOMAIN || 'https://localhost:5000',
+    enforceHttps: process.env.NODE_ENV === 'production',
   },
 };
 
-module.exports = hideConfig;
+module.exports = paymentConfig;
