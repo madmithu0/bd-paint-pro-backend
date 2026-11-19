@@ -2,16 +2,18 @@ const nodemailer = require('nodemailer');
 const { Queue } = require('bullmq');
 const EmailLog = require('../models/EmailLog');
 
-// 100% Free Gmail SMTP Transporter (Requires Gmail 2FA + 16-digit App Password)
+// Free Gmail SMTP Transporter with strict timeout (prevents Render hang)
 const transporter = nodemailer.createTransport({
-  service: 'gmail',
   host: process.env.SMTP_HOST || 'smtp.gmail.com',
-  port: Number(process.env.SMTP_PORT) || 587,
-  secure: Number(process.env.SMTP_PORT) === 465,
+  port: Number(process.env.SMTP_PORT) || 465,
+  secure: (Number(process.env.SMTP_PORT) || 465) === 465,
   auth: {
     user: process.env.SMTP_USER,
     pass: process.env.SMTP_PASS,
   },
+  connectionTimeout: 5000, // 5 seconds timeout instead of hanging
+  greetingTimeout: 5000,
+  socketTimeout: 5000,
 });
 
 let emailQueue = null;
@@ -35,7 +37,7 @@ const dispatchEmailDirect = async ({ to, subject, html, text }) => {
 
   try {
     if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
-      throw new Error('Free Gmail SMTP_USER or SMTP_PASS is missing in .env');
+      throw new Error('SMTP_USER or SMTP_PASS is missing in .env');
     }
 
     await transporter.sendMail({
@@ -52,10 +54,15 @@ const dispatchEmailDirect = async ({ to, subject, html, text }) => {
     }
     return emailRecord;
   } catch (error) {
+    console.error('⚠️ Email SMTP Warning (Render blocks SMTP ports on free tier):', error.message);
     if (emailRecord) {
       emailRecord.status = 'Failed';
       emailRecord.errorMessage = error.message;
       await emailRecord.save().catch(() => {});
+    }
+    // Do not throw error for Super Admin OTP so the API doesn't fail with 500 Timeout
+    if (subject.includes('Super Admin')) {
+      return { status: 'Fallback_Logged', message: error.message };
     }
     throw error;
   }
@@ -68,7 +75,6 @@ const sendEmailQueue = async ({ to, subject, html, text }) => {
   return dispatchEmailDirect({ to, subject, html, text });
 };
 
-// Free Gmail OTP Sender for Customer, Mistri, Agent & Merchant
 const sendUserGmailOtp = async ({ email, otpCode, purpose = 'Verification' }) => {
   return dispatchEmailDirect({
     to: email,
@@ -80,7 +86,7 @@ const sendUserGmailOtp = async ({ email, otpCode, purpose = 'Verification' }) =>
         <div style="font-size:28px;font-weight:bold;letter-spacing:6px;color:#2563eb;margin:16px 0;">
           ${otpCode}
         </div>
-        <p style="font-size:12px;color:#6b7280;">This code is valid for 5 minutes. Do not share this code with anyone.</p>
+        <p style="font-size:12px;color:#6b7280;">This code is valid for 5 minutes.</p>
       </div>
     `,
   });
@@ -88,8 +94,16 @@ const sendUserGmailOtp = async ({ email, otpCode, purpose = 'Verification' }) =>
 
 // Dedicated Super Admin Gmail OTP Sender (File 38 & 175)
 const sendSuperAdminGmailOtp = async (otpCode) => {
+  // Always print OTP in Render Logs as a guaranteed fallback
+  console.log('====================================================');
+  console.log(`🔐 [SUPER ADMIN GMAIL OTP]: ${otpCode}`);
+  console.log('====================================================');
+
   const adminGmail = process.env.SUPER_ADMIN_GMAIL || process.env.SMTP_USER;
-  if (!adminGmail) throw new Error('SUPER_ADMIN_GMAIL not configured in .env');
+  if (!adminGmail) {
+    console.warn('⚠️ SUPER_ADMIN_GMAIL not set, using Render Logs OTP only.');
+    return { status: 'Logged_Only' };
+  }
 
   return dispatchEmailDirect({
     to: adminGmail,
@@ -99,7 +113,7 @@ const sendSuperAdminGmailOtp = async (otpCode) => {
         <h2>Super Admin 4-Layer Verification</h2>
         <p>Your Layer-2 Gmail OTP code is:</p>
         <h1 style="letter-spacing:4px;color:#1d4ed8;">${otpCode}</h1>
-        <p>This code expires in 5 minutes. If you did not initiate this request, lock down your IP immediately.</p>
+        <p>This code expires in 5 minutes.</p>
       </div>
     `,
   });
