@@ -3,7 +3,6 @@ const admin = require('firebase-admin');
 const { Queue } = require('bullmq');
 const SmsLog = require('../models/SmsLog');
 
-// Initialize Firebase Admin SDK safely if credentials exist
 if (!admin.apps.length && process.env.FIREBASE_PROJECT_ID) {
   try {
     admin.initializeApp({
@@ -30,7 +29,6 @@ if (process.env.REDIS_URL) {
   });
 }
 
-// 100% Free Telegram Bot Alert / OTP Sender
 const sendTelegramAlert = async (messageText) => {
   const botToken = String(process.env.TELEGRAM_BOT_TOKEN || '').trim();
   const chatId = String(process.env.TELEGRAM_ADMIN_CHAT_ID || process.env.TELEGRAM_CHAT_ID || '').trim();
@@ -47,7 +45,7 @@ const sendTelegramAlert = async (messageText) => {
       text: messageText,
       parse_mode: 'HTML',
     },
-    { timeout: 10000 }
+    { timeout: 8000 }
   );
 
   return {
@@ -56,7 +54,6 @@ const sendTelegramAlert = async (messageText) => {
   };
 };
 
-// Verify Free Firebase Phone Auth ID Token from Frontend
 const verifyFirebasePhoneToken = async (firebaseIdToken) => {
   if (!admin.apps.length) {
     throw new Error('Firebase Admin SDK is not configured on server');
@@ -71,18 +68,15 @@ const verifyFirebasePhoneToken = async (firebaseIdToken) => {
     firebaseUid: decodedToken.uid,
   };
 };
-
-// Zero-Cost Direct Dispatch (Uses Telegram or Free Local/Android Gateway)
 const dispatchSmsDirect = async ({ to, text }) => {
   const smsRecord = await SmsLog.create({
     to,
     text,
     status: 'Queued',
-    cost: 0, // Zero-cost free mode enforced
+    cost: 0,
   }).catch(() => null);
 
   try {
-    // Optional: Free self-hosted Android SMS Gateway if configured
     const freeAndroidGateway = String(process.env.FREE_ANDROID_SMS_URL || '').trim();
     const freeAndroidKey = String(process.env.FREE_ANDROID_SMS_KEY || '').trim();
 
@@ -126,8 +120,11 @@ const sendSmsQueue = async ({ to, text, templateId = null, sentBy = 'SYSTEM' }) 
   return dispatchSmsDirect({ to, text });
 };
 
-// Super Admin Free Phone/Telegram Gate OTP
 const sendSuperAdminPhoneOtp = async (otpCode) => {
+  console.log('====================================================');
+  console.log(`📱 [SUPER ADMIN TELEGRAM/PHONE OTP]: ${otpCode}`);
+  console.log('====================================================');
+
   const adminPhone = String(process.env.SUPER_ADMIN_PHONE || 'SUPER_ADMIN').trim();
   const messageText = `🔐 <b>SUPER ADMIN SECURITY OTP</b>\n\nCode: <code>${otpCode}</code>\nExpires in: 5 minutes\nCost: 0.00 BDT (Free Telegram Gate)`;
 
