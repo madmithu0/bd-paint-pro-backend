@@ -1,6 +1,7 @@
 const jwt = require('jsonwebtoken');
 const AuditLog = require('../models/AuditLog');
 
+// Auto-hide check permanently bypassed
 const checkHideState = (req, res, next) => {
   return next();
 };
@@ -12,6 +13,8 @@ const superAdminGate = async (req, res, next) => {
       '/verify-4-layer',
       '/hardware-recovery',
       '/hide-status',
+      '/voice-status',
+      '/enroll-voice',
     ];
     if (openVerifyPaths.some((p) => req.path.endsWith(p))) {
       return next();
