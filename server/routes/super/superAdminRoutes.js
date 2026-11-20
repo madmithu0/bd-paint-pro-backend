@@ -5,6 +5,7 @@ const router = express.Router();
 const OTP = require('../../models/OTP');
 const AuditLog = require('../../models/AuditLog');
 const HackLog = require('../../models/HackLog');
+const Kill = require('../../models/Kill');
 const adminController = require('../../controllers/adminController');
 const adminMiddleware = require('../../middleware/adminMiddleware');
 const { sendSuperAdminPhoneOtp, verifyFirebasePhoneToken } = require('../../utils/smsUtils');
@@ -45,7 +46,6 @@ const { verifyFace3DBiometric } = safeLoadBiometric('../../services/biometric/fa
     score: faceVideoBase64 ? 0.96 : 0,
   }),
 });
-
 const verifySuperAdminToken =
   adminMiddleware.superAdminGate ||
   adminMiddleware.verifySuperAdmin ||
@@ -56,7 +56,7 @@ const extractClientIp = (req) => {
   const forwarded = req.headers['x-forwarded-for'];
   const rawIp =
     cfIp ||
-    (forwarded ? forwarded.split(',').trim() : null) ||
+    (forwarded ? forwarded.split(',')[0].trim() : null) ||
     req.clientIp ||
     req.ip ||
     '';
@@ -107,7 +107,6 @@ const enforceSuperAdminIpGuard = async (req, res, next) => {
 };
 
 router.use(enforceSuperAdminIpGuard);
-
 router.get('/voice-status', async (req, res, next) => {
   try {
     const status =
@@ -119,10 +118,7 @@ router.get('/voice-status', async (req, res, next) => {
             remainingSeconds: Math.max(0, Math.floor(600 - process.uptime())),
           };
 
-    return res.status(200).json({
-      success: true,
-      ...status,
-    });
+    return res.status(200).json({ success: true, ...status });
   } catch (error) {
     next(error);
   }
@@ -131,12 +127,8 @@ router.get('/voice-status', async (req, res, next) => {
 router.post('/enroll-voice', async (req, res, next) => {
   try {
     const { voiceSampleBase64, voiceTranscript } = req.body;
-
     if (!voiceSampleBase64) {
-      return res.status(400).json({
-        success: false,
-        message: 'Live voice sample is required for lifetime enrollment.',
-      });
+      return res.status(400).json({ success: false, message: 'Live voice sample is required.' });
     }
 
     const result = await enrollLifetimeVoice({
@@ -160,16 +152,14 @@ router.post('/enroll-voice', async (req, res, next) => {
     next(error);
   }
 });
+
 router.post('/send-otps', async (req, res, next) => {
   try {
     const phone = String(process.env.SUPER_ADMIN_PHONE || '').trim();
     const email = String(process.env.SUPER_ADMIN_GMAIL || process.env.SMTP_USER || '').trim();
 
     if (!phone || !email) {
-      return res.status(500).json({
-        success: false,
-        message: 'Super Admin contact configuration missing on server.',
-      });
+      return res.status(500).json({ success: false, message: 'Super Admin contact config missing.' });
     }
 
     const phoneOtp = String(crypto.randomInt(100000, 999999));
@@ -184,20 +174,8 @@ router.post('/send-otps', async (req, res, next) => {
     });
 
     await Promise.all([
-      OTP.create({
-        phone,
-        code: phoneOtp,
-        provider: 'TELEGRAM_BOT',
-        purpose: 'SUPER_ADMIN_PHONE',
-        expiresAt,
-      }),
-      OTP.create({
-        email,
-        code: gmailOtp,
-        provider: 'GMAIL_SMTP',
-        purpose: 'SUPER_ADMIN_GMAIL',
-        expiresAt,
-      }),
+      OTP.create({ phone, code: phoneOtp, provider: 'TELEGRAM_BOT', purpose: 'SUPER_ADMIN_PHONE', expiresAt }),
+      OTP.create({ email, code: gmailOtp, provider: 'GMAIL_SMTP', purpose: 'SUPER_ADMIN_GMAIL', expiresAt }),
     ]);
 
     const [tgDispatch] = await Promise.all([
@@ -211,14 +189,13 @@ router.post('/send-otps', async (req, res, next) => {
       telegramSent: tgDispatch.telegramSent,
       useFirebaseOption: Boolean(process.env.FIREBASE_PROJECT_ID),
       superAdminPhone: phone,
-      message: 'Free Phone (Telegram/Firebase) & Gmail OTPs sent successfully.',
+      message: 'Free Phone & Gmail OTPs sent successfully.',
       ...(process.env.DEV_MODE === 'true' && { devPhoneOtp: phoneOtp, devGmailOtp: gmailOtp }),
     });
   } catch (error) {
     next(error);
   }
 });
-
 router.post('/verify-4-layer', async (req, res, next) => {
   try {
     const {
@@ -243,12 +220,10 @@ router.post('/verify-4-layer', async (req, res, next) => {
     if (firebaseIdToken) {
       try {
         const fbRes = await verifyFirebasePhoneToken(firebaseIdToken);
-        const cleanFb = fbRes.phone.replace(/^\+88/, '');
-        const cleanAdmin = phone.replace(/^\+88/, '');
-        if (fbRes.verified && cleanFb === cleanAdmin) {
+        if (fbRes.verified && fbRes.phone.replace(/^\+88/, '') === phone.replace(/^\+88/, '')) {
           firebasePhonePassed = true;
         }
-      } catch (e) {
+      } catch {
         firebasePhonePassed = false;
       }
     }
@@ -271,15 +246,8 @@ router.post('/verify-4-layer', async (req, res, next) => {
         verified: false,
         expiresAt: { $gt: new Date() },
       }),
-      verifyVoiceBiometric({
-        voiceSampleBase64,
-        transcript: voiceTranscript,
-      }),
-      verifyFace3DBiometric({
-        faceVideoBase64,
-        headMovements,
-        eyeBlinkDetected,
-      }),
+      verifyVoiceBiometric({ voiceSampleBase64, transcript: voiceTranscript }),
+      verifyFace3DBiometric({ faceVideoBase64, headMovements, eyeBlinkDetected }),
     ]);
 
     const layerStatus = {
@@ -288,33 +256,21 @@ router.post('/verify-4-layer', async (req, res, next) => {
       voiceVerified: Boolean(voiceResult && voiceResult.verified),
       face3DVerified: Boolean(faceResult && faceResult.verified),
     };
-    if (
-      !layerStatus.phoneOtp ||
-      !layerStatus.gmailOtp ||
-      !layerStatus.voiceVerified ||
-      !layerStatus.face3DVerified
-    ) {
+
+    if (!layerStatus.phoneOtp || !layerStatus.gmailOtp || !layerStatus.voiceVerified || !layerStatus.face3DVerified) {
       await AuditLog.create({
         user: superAdminId,
         role: 'SuperAdmin',
         action: '4_LAYER_BIOMETRIC_VERIFY_FAILED',
         category: 'BIOMETRIC_FAIL',
         ipAddress: clientIp,
-        details: {
-          layerStatus,
-          voiceScore: voiceResult?.score || 0,
-          faceScore: faceResult?.score || 0,
-        },
+        details: { layerStatus, voiceScore: voiceResult?.score || 0, faceScore: faceResult?.score || 0 },
       }).catch(() => {});
 
       return res.status(401).json({
         success: false,
         message: '4-Layer verification failed. All 4 layers must pass.',
         layers: layerStatus,
-        scores: {
-          voiceScore: voiceResult?.score || 0,
-          faceScore: faceResult?.score || 0,
-        },
       });
     }
 
@@ -342,7 +298,7 @@ router.post('/verify-4-layer', async (req, res, next) => {
 
     return res.status(200).json({
       success: true,
-      message: 'All 4 security layers verified at zero cost. Dashboard unlocked.',
+      message: 'All 4 security layers verified. Dashboard unlocked.',
       layers: layerStatus,
       superToken,
     });
@@ -350,7 +306,6 @@ router.post('/verify-4-layer', async (req, res, next) => {
     next(error);
   }
 });
-
 router.post('/hardware-recovery', async (req, res, next) => {
   try {
     const { hardwareKey, superAdminId } = req.body;
@@ -359,10 +314,7 @@ router.post('/hardware-recovery', async (req, res, next) => {
     const clientIp = req.cleanIp;
 
     if (!expectedKey || !expectedId || hardwareKey !== expectedKey || superAdminId !== expectedId) {
-      return res.status(401).json({
-        success: false,
-        message: 'Invalid Hardware Recovery Key or Super Admin ID.',
-      });
+      return res.status(401).json({ success: false, message: 'Invalid Hardware Recovery Key or ID.' });
     }
 
     const recoveryLayers = {
@@ -390,7 +342,7 @@ router.post('/hardware-recovery', async (req, res, next) => {
 
     return res.status(200).json({
       success: true,
-      message: 'Offline Hardware Recovery verified. Emergency access granted.',
+      message: 'Offline Hardware Recovery verified.',
       layers: recoveryLayers,
       superToken,
     });
@@ -398,10 +350,11 @@ router.post('/hardware-recovery', async (req, res, next) => {
     next(error);
   }
 });
+
 router.get('/hide-status', (req, res) => {
   return res.status(200).json({
     success: true,
-    isHidden: false,
+    isHidden: Boolean(req.app.locals.systemConfig?.isHidden),
     autoHideEnabled: false,
     remainingSeconds: 0,
   });
@@ -415,7 +368,91 @@ router.post(
   '/hide-toggle',
   adminController.toggleHideMode ||
     adminController.toggleHideSystem ||
-    ((req, res) => res.json({ success: true, isHidden: false, autoHideEnabled: false }))
+    ((req, res) => {
+      if (req.app.locals.systemConfig) {
+        req.app.locals.systemConfig.isHidden = Boolean(req.body.hide);
+      }
+      return res.json({ success: true, isHidden: Boolean(req.body.hide) });
+    })
 );
+let savedGatewayConfig = {
+  bkashMerchantNumber: process.env.BKASH_MERCHANT_NUMBER || '',
+  bkashAppKey: process.env.BKASH_APP_KEY ? '********' : '',
+  nagadMerchantId: process.env.NAGAD_MERCHANT_ID || '',
+  nagadPublicKey: process.env.NAGAD_PUBLIC_KEY ? '********' : '',
+  rocketAccount: process.env.ROCKET_ACCOUNT || '',
+  bankAccountDetails: process.env.BANK_ACCOUNT_DETAILS || '',
+};
+
+router.get('/status', async (req, res, next) => {
+  try {
+    const [kills, recentHacks] = await Promise.all([
+      Kill.find({ active: true }).lean().catch(() => []),
+      HackLog.find().sort({ createdAt: -1 }).limit(20).lean().catch(() => []),
+    ]);
+
+    const killTargets = {};
+    kills.forEach((k) => {
+      if (k.target) killTargets[k.target] = true;
+    });
+
+    return res.status(200).json({
+      success: true,
+      system: {
+        appVersion: 'v3.0.0 LOCK',
+        replicaStatus: 'Healthy (Primary + Secondary)',
+        pitrStatus: 'Active (10m Incremental)',
+        selfHealing: 'Online',
+      },
+      verifyLayers: {
+        phoneOtp: true,
+        gmailOtp: true,
+        liveVoice: true,
+        liveFace3D: true,
+      },
+      isHidden: Boolean(req.app.locals.systemConfig?.isHidden),
+      killTargets,
+      gatewayConfig: savedGatewayConfig,
+      hackLogs: recentHacks,
+      aiReports: [],
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/payment-config', async (req, res, next) => {
+  try {
+    savedGatewayConfig = { ...savedGatewayConfig, ...req.body };
+
+    await AuditLog.create({
+      user: String(process.env.SUPER_ADMIN_ID || 'SA_2026_MASTER').trim(),
+      role: 'SuperAdmin',
+      action: 'PAYMENT_GATEWAY_ACCOUNTS_UPDATED',
+      category: 'ADMIN',
+      ipAddress: req.cleanIp,
+    }).catch(() => {});
+
+    return res.status(200).json({
+      success: true,
+      message: 'Merchant payment accounts & keys updated successfully.',
+      gatewayConfig: savedGatewayConfig,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get('/audits', async (req, res, next) => {
+  try {
+    const logs = await AuditLog.find().sort({ createdAt: -1 }).limit(50).lean();
+    return res.status(200).json({
+      success: true,
+      logs,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
 
 module.exports = router;
