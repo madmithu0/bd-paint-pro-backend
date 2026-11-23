@@ -3,14 +3,12 @@ const sharp = require('sharp');
 const cloudinary = require('cloudinary').v2;
 const { Readable } = require('stream');
 
-// Configure Cloudinary
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
   api_key: process.env.CLOUDINARY_API_KEY,
   api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 
-// Zero Local Disk Storage: Keep files strictly in RAM buffer
 const storage = multer.memoryStorage();
 
 const ALLOWED_IMAGE_MIMES = ['image/jpeg', 'image/png', 'image/webp'];
@@ -26,24 +24,52 @@ const fileFilter = (req, file, cb) => {
   }
 };
 
-// Multer Upload Instance (Max 15MB for Live Face Video / Wall Photos)
+const avatarFileFilter = (req, file, cb) => {
+  if (ALLOWED_IMAGE_MIMES.includes(file.mimetype)) {
+    cb(null, true);
+  } else {
+    cb(new Error('Only JPEG, PNG, or WebP images are allowed for profile avatar'), false);
+  }
+};
+
 const uploadMemory = multer({
   storage,
   fileFilter,
   limits: {
-    fileSize: 15 * 1024 * 1024, // 15 MB limit
+    fileSize: 15 * 1024 * 1024,
   },
 });
 
-// Magic-Byte Signature Verification for Images
+const uploadAvatarMemory = multer({
+  storage,
+  fileFilter: avatarFileFilter,
+  limits: {
+    fileSize: 2 * 1024 * 1024,
+  },
+});
+
 const verifyMagicBytes = (buffer) => {
   if (!buffer || buffer.length < 4) return false;
   const hex = buffer.toString('hex', 0, 4).toUpperCase();
-  // JPEG (FFD8FF), PNG (89504E47), WEBP (52494646)
   return hex.startsWith('FFD8FF') || hex === '89504E47' || hex === '52494646';
 };
 
-// Sharp Image Re-encoding (Strips EXIF & Hidden Steganography Malware) + Direct Cloud Stream
+const streamBufferToCloudinary = (buffer, folder, resourceType = 'image') => {
+  return new Promise((resolve, reject) => {
+    const cloudStream = cloudinary.uploader.upload_stream(
+      {
+        folder,
+        resource_type: resourceType,
+      },
+      (error, result) => {
+        if (error) return reject(error);
+        resolve(result);
+      }
+    );
+    Readable.from(buffer).pipe(cloudStream);
+  });
+};
+
 const processAndStreamToCloud = async (req, res, next) => {
   try {
     if (!req.file) return next();
@@ -60,7 +86,6 @@ const processAndStreamToCloud = async (req, res, next) => {
         });
       }
 
-      // Re-encode image with Sharp to strip all EXIF metadata & hidden payloads
       uploadBuffer = await sharp(req.file.buffer)
         .rotate()
         .resize({ width: 1600, withoutEnlargement: true })
@@ -71,21 +96,11 @@ const processAndStreamToCloud = async (req, res, next) => {
     } else if (ALLOWED_VIDEO_MIMES.includes(req.file.mimetype)) {
       resourceType = 'video';
     }
-
-    // Stream directly to Cloudinary without touching local disk
-    const uploadResult = await new Promise((resolve, reject) => {
-      const cloudStream = cloudinary.uploader.upload_stream(
-        {
-          folder: 'enterprise_paint_v3',
-          resource_type: resourceType,
-        },
-        (error, result) => {
-          if (error) return reject(error);
-          resolve(result);
-        }
-      );
-      Readable.from(uploadBuffer).pipe(cloudStream);
-    });
+    const uploadResult = await streamBufferToCloudinary(
+      uploadBuffer,
+      'enterprise_paint_v3',
+      resourceType
+    );
 
     req.uploadedMediaUrl = uploadResult.secure_url;
     req.uploadedPublicId = uploadResult.public_id;
@@ -99,8 +114,57 @@ const processAndStreamToCloud = async (req, res, next) => {
   }
 };
 
+const processAvatarAndStreamToCloud = async (req, res, next) => {
+  try {
+    if (!req.file) return next();
+
+    if (!verifyMagicBytes(req.file.buffer)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Security Alert: Invalid avatar image file signature.',
+      });
+    }
+
+    const avatarBuffer = await sharp(req.file.buffer)
+      .rotate()
+      .resize(300, 300, { fit: 'cover', position: 'center' })
+      .webp({ quality: 80 })
+      .toBuffer();
+
+    const uploadResult = await streamBufferToCloudinary(
+      avatarBuffer,
+      'enterprise_paint_v3/avatars',
+      'image'
+    );
+
+    req.uploadedMediaUrl = uploadResult.secure_url;
+    req.uploadedPublicId = uploadResult.public_id;
+    next();
+  } catch (error) {
+    console.error('[AVATAR UPLOAD ERROR]:', error.message);
+    return res.status(500).json({
+      success: false,
+      message: 'Avatar image processing failed.',
+    });
+  }
+};
+
+const deleteCloudAsset = async (publicId) => {
+  if (!publicId) return false;
+  try {
+    await cloudinary.uploader.destroy(publicId);
+    return true;
+  } catch (error) {
+    console.error('[CLOUDINARY DELETE ERROR]:', error.message);
+    return false;
+  }
+};
+
 module.exports = {
   uploadSingleImage: uploadMemory.single('photo'),
+  uploadAvatarImage: uploadAvatarMemory.single('avatar'),
   uploadBiometricMedia: uploadMemory.single('media'),
   processAndStreamToCloud,
+  processAvatarAndStreamToCloud,
+  deleteCloudAsset,
 };
