@@ -14,8 +14,6 @@ console.log('CHECK MIDDLEWARE:', {
 
 const router = express.Router();
 
-const router = express.Router();
-
 const emitServiceUpdate = (req, payload) => {
   const io = req.app.get('io');
   if (io) {
