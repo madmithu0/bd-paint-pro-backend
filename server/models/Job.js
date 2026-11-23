@@ -1,5 +1,54 @@
 const mongoose = require('mongoose');
 
+const selectedServiceItemSchema = new mongoose.Schema(
+  {
+    serviceId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'ServiceCategory',
+      required: true,
+    },
+    code: {
+      type: String,
+      required: true,
+    },
+    name: {
+      type: String,
+      required: true,
+    },
+    sqft: {
+      type: Number,
+      required: true,
+      min: 1,
+    },
+    isMistriOnly: {
+      type: Boolean,
+      default: false,
+    },
+    slotSqftPerDay: {
+      type: Number,
+      required: true,
+      default: 450,
+    },
+    calculatedSlots: {
+      type: Number,
+      default: 0,
+    },
+    appliedRate: {
+      type: Number,
+      required: true,
+    },
+    subTotal: {
+      type: Number,
+      required: true,
+    },
+    estimatedMaterialCost: {
+      type: Number,
+      default: 0,
+    },
+  },
+  { _id: false }
+);
+
 const jobSchema = new mongoose.Schema(
   {
     customer: {
@@ -24,6 +73,10 @@ const jobSchema = new mongoose.Schema(
       ref: 'Team',
       default: null,
     },
+    selectedServices: {
+      type: [selectedServiceItemSchema],
+      default: [],
+    },
     sqft: {
       type: Number,
       required: [true, 'Square feet (Sqft) is required'],
@@ -33,6 +86,10 @@ const jobSchema = new mongoose.Schema(
       type: Number,
       required: [true, 'Total job price is required'],
       min: 0,
+    },
+    netProfit: {
+      type: Number,
+      default: 0,
     },
     status: {
       type: String,
@@ -49,6 +106,10 @@ const jobSchema = new mongoose.Schema(
       type: Number,
       default: 0,
     },
+    materialMemoApproved: {
+      type: Boolean,
+      default: false,
+    },
     labourCost: {
       type: Number,
       default: 0,
@@ -57,11 +118,13 @@ const jobSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
-    // 450 Sqft Per Day Calculation Lock (100 Sqft = 0.22 Day)
     perDayCapacity: {
       type: Number,
       default: 450,
-      immutable: true,
+    },
+    totalSlots: {
+      type: Number,
+      default: 0,
     },
     totalDays: {
       type: Number,
@@ -72,7 +135,27 @@ const jobSchema = new mongoose.Schema(
       default: 1,
       min: 1,
     },
-    // Wall Condition & AI Measurement Data
+    isSiteVisitRequested: {
+      type: Boolean,
+      default: false,
+    },
+    siteVisitStatus: {
+      type: String,
+      enum: ['None', 'Requested', 'Scheduled', 'Completed'],
+      default: 'None',
+    },
+    milestoneStages: {
+      stage1Percent: { type: Number, default: 30 },
+      stage1Amount: { type: Number, default: 0 },
+      stage1Paid: { type: Boolean, default: false },
+      stage1PaidAt: { type: Date, default: null },
+      stage2Percent: { type: Number, default: 40 },
+      stage2Amount: { type: Number, default: 0 },
+      stage2Paid: { type: Boolean, default: false },
+      stage3Percent: { type: Number, default: 30 },
+      stage3Amount: { type: Number, default: 0 },
+      stage3Paid: { type: Boolean, default: false },
+    },
     wallProblem: {
       type: [String],
       enum: ['None', 'Nona', 'Damp', 'Fatol'],
@@ -87,7 +170,6 @@ const jobSchema = new mongoose.Schema(
       type: [String],
       default: [],
     },
-    // Auto Revenue Share Split Percentages
     hasAgent: {
       type: Boolean,
       default: false,
@@ -104,7 +186,6 @@ const jobSchema = new mongoose.Schema(
       type: Number,
       default: 20,
     },
-    // Job Start & End OTP Security
     startOtp: {
       type: String,
       default: null,
@@ -130,31 +211,3 @@ const jobSchema = new mongoose.Schema(
     timestamps: true,
   }
 );
-
-// Auto-calculate 450 Sqft Days, Mistri-Only Cost & Share Split before saving
-jobSchema.pre('save', function (next) {
-  // 1. 450 Sqft Day Formula
-  const rawDays = this.sqft / 450;
-  this.totalDays = Number((rawDays / Math.max(1, this.mistriCount)).toFixed(2));
-
-  // 2. Mistri-Only Check (Material Cost = 0 if customer provides paint)
-  if (this.isMistriOnly || this.materialSource === 'CustomerOwn') {
-    this.isMistriOnly = true;
-    this.materialCost = 0;
-  }
-
-  // 3. Auto Revenue Share Split Lock (Mistri 80%, Agent 5%+Platform 15% OR Platform 20%)
-  this.hasAgent = Boolean(this.agent);
-  this.mistriSharePercent = 80;
-  if (this.hasAgent) {
-    this.agentSharePercent = 5;
-    this.platformSharePercent = 15;
-  } else {
-    this.agentSharePercent = 0;
-    this.platformSharePercent = 20;
-  }
-
-  next();
-});
-
-module.exports = mongoose.model('Job', jobSchema);
