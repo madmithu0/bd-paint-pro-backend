@@ -24,6 +24,7 @@ const safeRequire = (modulePath, fallback = null) => {
 const connectDB = require('./db');
 const paymentConfig = safeRequire('./config/paymentConfig', { validateConfig: () => true });
 const securityConfig = safeRequire('./config/securityConfig', { helmetOptions: {}, corsOptions: {} });
+const { seedDefaultServiceRates } = safeRequire('./seed/serviceRateSeed', { seedDefaultServiceRates: async () => {} });
 
 const { initAutoBackup } = safeRequire('./utils/backupUtils', { initAutoBackup: () => {} });
 const { banIpAuto } = safeRequire('./utils/wafSecurityUtils', { banIpAuto: async () => {} });
@@ -86,7 +87,9 @@ app.set('trust proxy', 1);
 app.locals.systemConfig = {
   version: APP_VERSION,
   lock: ARCHITECTURE_LOCK,
-  sqftPerDay: 450,
+  defaultSqftPerDay: 450,
+  dynamicServiceSlots: true,
+  advanceGatePercent: 0.30,
   aiConfidenceThreshold: 0.80,
   biometricThreshold: 0.90,
   shareSplit: {
@@ -141,6 +144,7 @@ paymentWebhookRouter.post('/nagad/callback', verifyHmacSignature, (req, res, nex
   res.status(200).json({ status: 'Webhook endpoint ready' });
 });
 app.use(`${API_PREFIX}/webhooks`, paymentWebhookRouter);
+
 const failedSuperAdminAttempts = new Map();
 
 const superAdminIpGuard = async (req, res, next) => {
@@ -169,6 +173,9 @@ app.use(API_PREFIX, checkKillSwitch);
 
 const routeRegistry = [
   { path: '/auth', file: './routes/authRoutes', protected: false },
+  { path: '/services', file: './routes/serviceCategoryRoutes', protected: false },
+  { path: '/warranties', file: './routes/warrantyRoutes', protected: false },
+  { path: '/seo', file: './routes/seoRoutes', protected: false },
   { path: '/users', file: './routes/userRoutes', protected: true },
   { path: '/jobs', file: './routes/jobRoutes', protected: true },
   { path: '/teams', file: './routes/teamRoutes', protected: true },
@@ -189,7 +196,6 @@ const routeRegistry = [
   { path: '/backup', file: './routes/backupRoutes', protected: true },
   { path: '/govt', file: './routes/govtRoutes', protected: true },
 ];
-
 routeRegistry.forEach((route) => {
   const routerInstance = safeRequire(route.file);
   if (routerInstance) {
@@ -218,6 +224,7 @@ const startServer = async () => {
     if (initSelfHealing) initSelfHealing(server);
 
     if (isPrimaryClusterInstance) {
+      if (seedDefaultServiceRates) await seedDefaultServiceRates();
       if (initAutoBackup) initAutoBackup();
       if (verifyGovtCompliance) await verifyGovtCompliance();
     }
