@@ -3,8 +3,8 @@ const mongoose = require('mongoose');
 const ServiceCategory = require('../models/ServiceCategory');
 const User = require('../models/User');
 const AuditLog = require('../models/AuditLog');
-const { protect } = require('../middleware/authMiddleware');
-const { verifySuperAdmin } = require('../middleware/adminMiddleware');
+const { verifyToken } = require('../middleware/authMiddleware');
+const { superAdminGate } = require('../middleware/adminMiddleware');
 
 const router = express.Router();
 
@@ -30,7 +30,7 @@ router.get('/', async (req, res, next) => {
   }
 });
 
-router.get('/super/all', protect, verifySuperAdmin, async (req, res, next) => {
+router.get('/super/all', verifyToken, superAdminGate, async (req, res, next) => {
   try {
     const services = await ServiceCategory.find({})
       .sort({ displayOrder: 1, createdAt: 1 })
@@ -124,8 +124,7 @@ router.post('/estimate', async (req, res, next) => {
     next(error);
   }
 });
-
-router.patch('/mistri/skills', protect, async (req, res, next) => {
+router.patch('/mistri/skills', verifyToken, async (req, res, next) => {
   try {
     if (req.user.role !== 'Mistri') {
       return res.status(403).json({
@@ -151,7 +150,7 @@ router.patch('/mistri/skills', protect, async (req, res, next) => {
     }).select('_id');
 
     const approvedIds = activeServices.map((s) => s._id);
-    await User.findByIdAndUpdate(req.user._id, {
+    await User.findByIdAndUpdate(req.user.id, {
       $set: { capableServices: approvedIds },
     });
 
@@ -167,8 +166,8 @@ router.patch('/mistri/skills', protect, async (req, res, next) => {
 
 router.patch(
   '/super/:id/update',
-  protect,
-  verifySuperAdmin,
+  verifyToken,
+  superAdminGate,
   async (req, res, next) => {
     try {
       const {
@@ -200,15 +199,15 @@ router.patch(
       if (typeof isLabourOnlyEnabled === 'boolean') service.isLabourOnlyEnabled = isLabourOnlyEnabled;
       if (typeof isWithMaterialEnabled === 'boolean') service.isWithMaterialEnabled = isWithMaterialEnabled;
       if (disabledReason !== undefined) service.disabledReason = disabledReason;
-      service.updatedBy = req.user._id;
+      service.updatedBy = req.user.id;
 
       await service.save();
 
       await AuditLog.create({
-        user: req.user._id,
+        user: req.user.id,
         action: `SUPER_ADMIN_SERVICE_UPDATE:${service.code}`,
         ip: req.ip,
-      });
+      }).catch(() => {});
 
       emitServiceUpdate(req, { action: 'UPDATED', service });
 
@@ -223,11 +222,11 @@ router.patch(
   }
 );
 
-router.post('/super/create', protect, verifySuperAdmin, async (req, res, next) => {
+router.post('/super/create', verifyToken, superAdminGate, async (req, res, next) => {
   try {
     const newService = await ServiceCategory.create({
       ...req.body,
-      updatedBy: req.user._id,
+      updatedBy: req.user.id,
     });
 
     emitServiceUpdate(req, { action: 'CREATED', service: newService });
