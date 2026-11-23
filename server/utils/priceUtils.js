@@ -1,12 +1,12 @@
 const SQFT_PER_DAY_LOCK = 450;
-const LABOUR_RATE_PER_SQFT = 12; // BDT per Sqft
-const MATERIAL_RATE_PER_SQFT = 18; // BDT per Sqft
+const LABOUR_RATE_PER_SQFT = 12;
+const MATERIAL_RATE_PER_SQFT = 18;
 
 const WALL_REPAIR_SURCHARGE = {
   None: 0,
-  Nona: 5,  // Nona Chemical treatment per Sqft
-  Damp: 6,  // Damp Sealer coat per Sqft
-  Fatol: 4, // Fatol Putty & Crack filling per Sqft
+  Nona: 5,
+  Damp: 6,
+  Fatol: 4,
 };
 
 const DAMAGE_MULTIPLIER = {
@@ -25,22 +25,26 @@ const calculateJobPriceAndDays = ({
 }) => {
   const numericSqft = Math.max(1, Number(sqft));
 
-  // 1. Base Days & Auto Mistri Count (450 Sqft = 1 Mistri for 1 Day)
   const baseDays = Number((numericSqft / SQFT_PER_DAY_LOCK).toFixed(2));
   const recommendedMistri = Math.max(1, Math.ceil(numericSqft / 900));
-  const mistriCount = requestedMistriCount ? Math.max(1, Number(requestedMistriCount)) : recommendedMistri;
+  const mistriCount = requestedMistriCount
+    ? Math.max(1, Number(requestedMistriCount))
+    : recommendedMistri;
   const totalDays = Number((baseDays / mistriCount).toFixed(2));
 
-  // 2. Labour & Wall Repair Cost Calculation
   const problems = Array.isArray(wallProblem) ? wallProblem : [wallProblem];
-  const repairRatePerSqft = problems.reduce((sum, prob) => sum + (WALL_REPAIR_SURCHARGE[prob] || 0), 0);
+  const repairRatePerSqft = problems.reduce(
+    (sum, prob) => sum + (WALL_REPAIR_SURCHARGE[prob] || 0),
+    0
+  );
   const damageFactor = DAMAGE_MULTIPLIER[wallDamageLevel] || 1.0;
 
   const repairCost = Math.round(numericSqft * repairRatePerSqft * damageFactor);
   const labourCost = Math.round(numericSqft * LABOUR_RATE_PER_SQFT + repairCost);
 
-  // 3. Material Cost (Zero if Customer provides own paint / Mistri-Only mode)
-  const materialCost = isMistriOnly ? 0 : Math.round(numericSqft * MATERIAL_RATE_PER_SQFT);
+  const materialCost = isMistriOnly
+    ? 0
+    : Math.round(numericSqft * MATERIAL_RATE_PER_SQFT);
   const totalPrice = labourCost + materialCost;
 
   return {
@@ -58,7 +62,93 @@ const calculateJobPriceAndDays = ({
   };
 };
 
+const calculateDynamicServiceSelection = ({
+  items = [],
+  wallProblem = ['None'],
+  wallDamageLevel = 'Low',
+  requestedMistriCount = null,
+}) => {
+  let totalSqft = 0;
+  let totalSlots = 0;
+  let totalLabourCost = 0;
+  let totalMaterialCost = 0;
+
+  items.forEach((item) => {
+    const sqft = Math.max(0, Number(item.sqft) || 0);
+    const slotCapacity = Math.max(50, Number(item.slotSqftPerDay) || SQFT_PER_DAY_LOCK);
+    const labourRate = Math.max(0, Number(item.labourRatePerSqft) || 0);
+    const withMaterialRate = Math.max(labourRate, Number(item.withMaterialRatePerSqft) || 0);
+    const isMistriOnly = Boolean(item.isMistriOnly);
+
+    const itemSlots = sqft / slotCapacity;
+    const itemLabour = sqft * labourRate;
+    const itemMaterial = isMistriOnly ? 0 : sqft * (withMaterialRate - labourRate);
+
+    totalSqft += sqft;
+    totalSlots += itemSlots;
+    totalLabourCost += itemLabour;
+    totalMaterialCost += itemMaterial;
+  });
+
+  const problems = Array.isArray(wallProblem) ? wallProblem : [wallProblem];
+  const repairRatePerSqft = problems.reduce(
+    (sum, prob) => sum + (WALL_REPAIR_SURCHARGE[prob] || 0),
+    0
+  );
+  const damageFactor = DAMAGE_MULTIPLIER[wallDamageLevel] || 1.0;
+  const repairCost = Math.round(totalSqft * repairRatePerSqft * damageFactor);
+  const finalLabourCost = Math.round(totalLabourCost + repairCost);
+  const finalMaterialCost = Math.round(totalMaterialCost);
+  const totalPrice = finalLabourCost + finalMaterialCost;
+
+  const roundedSlots = Number(totalSlots.toFixed(2));
+  const mistriCount = requestedMistriCount
+    ? Math.max(1, Number(requestedMistriCount))
+    : Math.max(1, Math.ceil(roundedSlots / 5));
+  const totalDays = Number((roundedSlots / mistriCount).toFixed(2));
+
+  return {
+    totalSqft,
+    totalSlots: roundedSlots,
+    mistriCount,
+    totalDays,
+    repairCost,
+    labourCost: finalLabourCost,
+    materialCost: finalMaterialCost,
+    totalPrice,
+    advance30Percent: Math.round(totalPrice * 0.3),
+    shareVersionLock: 'v3.0.0-80-5-15',
+  };
+};
+
+const calculateNetProfitSplit = ({
+  totalPrice,
+  materialCost = 0,
+  hasAgent = false,
+  merchantCommissionRate = 4,
+}) => {
+  const netProfit = Math.max(0, Number(totalPrice) - Number(materialCost));
+  const mistriShare = Number((netProfit * 0.8).toFixed(2));
+  const agentShare = hasAgent ? Number((netProfit * 0.05).toFixed(2)) : 0;
+  const platformShare = hasAgent
+    ? Number((netProfit * 0.15).toFixed(2))
+    : Number((netProfit * 0.2).toFixed(2));
+  const merchantCommission = Number(
+    (Number(materialCost) * (Number(merchantCommissionRate) / 100)).toFixed(2)
+  );
+
+  return {
+    netProfit,
+    mistriShare,
+    agentShare,
+    platformShare,
+    merchantCommission,
+  };
+};
+
 module.exports = {
   SQFT_PER_DAY_LOCK,
   calculateJobPriceAndDays,
+  calculateDynamicServiceSelection,
+  calculateNetProfitSplit,
 };
