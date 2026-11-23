@@ -57,8 +57,8 @@ router.get('/:userId', async (req, res, next) => {
         ? { _id: jobId }
         : {
             $or: [
-              { customerId: currentUserId, assignedMistriIds: otherUserId },
-              { customerId: otherUserId, assignedMistriIds: currentUserId },
+              { customer: currentUserId, assignedMistri: otherUserId },
+              { customer: otherUserId, assignedMistri: currentUserId },
             ],
           };
 
@@ -102,32 +102,3 @@ router.get('/:userId', async (req, res, next) => {
     next(error);
   }
 });
-router.patch('/seen/:senderId', async (req, res, next) => {
-  try {
-    const result = await Chat.updateMany(
-      {
-        sender: req.params.senderId,
-        receiver: req.user.id,
-        seen: false,
-      },
-      { $set: { seen: true, seenAt: new Date() } }
-    );
-
-    const io = req.app.get('io');
-    if (io) {
-      io.to(String(req.params.senderId)).emit('messages_seen', {
-        byUser: req.user.id,
-        seenAt: new Date(),
-      });
-    }
-
-    return res.status(200).json({
-      success: true,
-      updatedCount: result.modifiedCount,
-    });
-  } catch (error) {
-    next(error);
-  }
-});
-
-module.exports = router;
