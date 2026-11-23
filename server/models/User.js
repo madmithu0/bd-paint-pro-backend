@@ -22,7 +22,6 @@ const userSchema = new mongoose.Schema(
       lowercase: true,
       sparse: true,
     },
-    // Strict Role Lock: SuperAdmin is strictly excluded from database User collection
     role: {
       type: String,
       enum: {
@@ -54,7 +53,6 @@ const userSchema = new mongoose.Schema(
       type: String,
       default: null,
     },
-    // Mistri & Merchant specific verification fields
     nidNumber: {
       type: String,
       default: null,
@@ -67,7 +65,57 @@ const userSchema = new mongoose.Schema(
       type: [String],
       default: [],
     },
+    capableServices: [
+      {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'ServiceCategory',
+      },
+    ],
+    isAvailable: {
+      type: Boolean,
+      default: true,
+      index: true,
+    },
+    qualityScore: {
+      type: Number,
+      default: 5.0,
+      min: 1.0,
+      max: 5.0,
+    },
+    penaltyStatus: {
+      type: String,
+      enum: ['Active', 'Warning', 'Suspended'],
+      default: 'Active',
+    },
+    district: {
+      type: String,
+      trim: true,
+      default: '',
+      index: true,
+    },
+    upazila: {
+      type: String,
+      trim: true,
+      default: '',
+      index: true,
+    },
+    referralCode: {
+      type: String,
+      unique: true,
+      sparse: true,
+      uppercase: true,
+      trim: true,
+    },
+    referredByAgent: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+      default: null,
+    },
     profilePhoto: {
+      type: String,
+      default: '',
+    },
+    avatarPublicId: {
       type: String,
       default: '',
     },
@@ -82,7 +130,6 @@ const userSchema = new mongoose.Schema(
   }
 );
 
-// Hash password using Argon2 before saving
 userSchema.pre('save', async function (next) {
   if (!this.isModified('password')) return next();
   try {
@@ -93,7 +140,6 @@ userSchema.pre('save', async function (next) {
   }
 });
 
-// Verify password helper method
 userSchema.methods.comparePassword = async function (candidatePassword) {
   return argon2.verify(this.password, candidatePassword);
 };
