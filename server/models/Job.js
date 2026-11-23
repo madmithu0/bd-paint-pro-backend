@@ -211,3 +211,59 @@ const jobSchema = new mongoose.Schema(
     timestamps: true,
   }
 );
+
+jobSchema.pre('save', function (next) {
+  if (Array.isArray(this.selectedServices) && this.selectedServices.length > 0) {
+    let sumSqft = 0;
+    let sumSlots = 0;
+    let sumPrice = 0;
+    let sumMaterial = 0;
+    let allMistriOnly = true;
+
+    this.selectedServices.forEach((item) => {
+      const itemSlots = Number((item.sqft / Math.max(50, item.slotSqftPerDay)).toFixed(2));
+      item.calculatedSlots = itemSlots;
+      sumSqft += item.sqft;
+      sumSlots += itemSlots;
+      sumPrice += item.subTotal;
+      sumMaterial += item.isMistriOnly ? 0 : item.estimatedMaterialCost;
+      if (!item.isMistriOnly) allMistriOnly = false;
+    });
+
+    this.sqft = sumSqft;
+    this.price = sumPrice;
+    this.isMistriOnly = allMistriOnly;
+    this.materialCost = allMistriOnly ? 0 : sumMaterial;
+    this.totalSlots = Number(sumSlots.toFixed(2));
+  } else {
+    if (this.isMistriOnly || this.materialSource === 'CustomerOwn') {
+      this.isMistriOnly = true;
+      this.materialCost = 0;
+    }
+    this.totalSlots = Number((this.sqft / Math.max(50, this.perDayCapacity)).toFixed(2));
+  }
+
+  this.totalDays = Number((this.totalSlots / Math.max(1, this.mistriCount)).toFixed(2));
+  this.netProfit = Math.max(0, this.price - this.materialCost);
+
+  this.milestoneStages.stage1Amount = Math.round(this.price * 0.30);
+  this.milestoneStages.stage2Amount = Math.round(this.price * 0.40);
+  this.milestoneStages.stage3Amount = Math.max(
+    0,
+    this.price - this.milestoneStages.stage1Amount - this.milestoneStages.stage2Amount
+  );
+
+  this.hasAgent = Boolean(this.agent);
+  this.mistriSharePercent = 80;
+  if (this.hasAgent) {
+    this.agentSharePercent = 5;
+    this.platformSharePercent = 15;
+  } else {
+    this.agentSharePercent = 0;
+    this.platformSharePercent = 20;
+  }
+
+  next();
+});
+
+module.exports = mongoose.model('Job', jobSchema);
