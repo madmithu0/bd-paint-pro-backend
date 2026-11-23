@@ -18,7 +18,7 @@ const enforceAdvancePaymentGate = async (req, res, next) => {
     }
 
     const job = await Job.findById(jobId)
-      .select('customerId assignedMistriIds milestoneStages status')
+      .select('customer assignedMistri milestoneStages status')
       .lean();
 
     if (!job) {
@@ -29,10 +29,10 @@ const enforceAdvancePaymentGate = async (req, res, next) => {
       });
     }
 
-    const userId = String(req.user._id);
-    const isCustomer = String(job.customerId) === userId;
-    const isAssignedMistri = Array.isArray(job.assignedMistriIds)
-      ? job.assignedMistriIds.some((id) => String(id) === userId)
+    const userId = String(req.user.id || req.user._id);
+    const isCustomer = String(job.customer) === userId;
+    const isAssignedMistri = Array.isArray(job.assignedMistri)
+      ? job.assignedMistri.some((id) => String(id) === userId)
       : false;
 
     if (!isCustomer && !isAssignedMistri) {
