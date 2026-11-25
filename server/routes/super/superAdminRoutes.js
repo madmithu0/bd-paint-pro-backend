@@ -8,44 +8,25 @@ const HackLog = require('../../models/HackLog');
 const Kill = require('../../models/Kill');
 const adminController = require('../../controllers/adminController');
 const adminMiddleware = require('../../middleware/adminMiddleware');
+const {
+  verifyPassword,
+  hashPassword,
+  validatePasswordStrength,
+} = require('../../services/auth/passwordSecurityService');
 const { sendSuperAdminPhoneOtp, verifyFirebasePhoneToken } = require('../../utils/smsUtils');
 const { sendSuperAdminGmailOtp } = require('../../utils/emailUtils');
 const { generateSuperAdmin4LayerToken } = require('../../utils/tokenUtils');
 
-const safeLoadBiometric = (path, fallbackObj) => {
+const safeRequireModel = (modelPath) => {
   try {
-    return require(path);
+    return require(modelPath);
   } catch (err) {
-    return fallbackObj;
+    return null;
   }
 };
 
-const {
-  verifyVoiceBiometric,
-  getVoiceEnrollmentStatus,
-  enrollLifetimeVoice,
-} = safeLoadBiometric('../../services/biometric/voiceVerify', {
-  verifyVoiceBiometric: async ({ voiceSampleBase64 }) => ({
-    verified: Boolean(voiceSampleBase64),
-    score: voiceSampleBase64 ? 0.95 : 0,
-  }),
-  getVoiceEnrollmentStatus: async () => ({
-    isEnrolled: false,
-    canEnroll: process.uptime() <= 600,
-    remainingSeconds: Math.max(0, Math.floor(600 - process.uptime())),
-  }),
-  enrollLifetimeVoice: async () => ({
-    success: false,
-    message: 'Voice biometric service unavailable.',
-  }),
-});
+const SuperAdminSecurity = safeRequireModel('../../models/SuperAdminSecurity');
 
-const { verifyFace3DBiometric } = safeLoadBiometric('../../services/biometric/face3DVerify', {
-  verifyFace3DBiometric: async ({ faceVideoBase64, eyeBlinkDetected }) => ({
-    verified: Boolean(faceVideoBase64 && eyeBlinkDetected),
-    score: faceVideoBase64 ? 0.96 : 0,
-  }),
-});
 const verifySuperAdminToken =
   adminMiddleware.superAdminGate ||
   adminMiddleware.verifySuperAdmin ||
@@ -107,51 +88,6 @@ const enforceSuperAdminIpGuard = async (req, res, next) => {
 };
 
 router.use(enforceSuperAdminIpGuard);
-router.get('/voice-status', async (req, res, next) => {
-  try {
-    const status =
-      typeof getVoiceEnrollmentStatus === 'function'
-        ? await getVoiceEnrollmentStatus()
-        : {
-            isEnrolled: false,
-            canEnroll: process.uptime() <= 600,
-            remainingSeconds: Math.max(0, Math.floor(600 - process.uptime())),
-          };
-
-    return res.status(200).json({ success: true, ...status });
-  } catch (error) {
-    next(error);
-  }
-});
-
-router.post('/enroll-voice', async (req, res, next) => {
-  try {
-    const { voiceSampleBase64, voiceTranscript } = req.body;
-    if (!voiceSampleBase64) {
-      return res.status(400).json({ success: false, message: 'Live voice sample is required.' });
-    }
-
-    const result = await enrollLifetimeVoice({
-      voiceSampleBase64,
-      transcript: voiceTranscript,
-      ipAddress: req.cleanIp,
-    });
-
-    if (result.success) {
-      await AuditLog.create({
-        user: String(process.env.SUPER_ADMIN_ID || 'SA_2026_MASTER').trim(),
-        role: 'SuperAdmin',
-        action: 'LIFETIME_VOICE_ENROLLED',
-        category: 'ADMIN',
-        ipAddress: req.cleanIp,
-      }).catch(() => {});
-    }
-
-    return res.status(result.success ? 200 : 400).json(result);
-  } catch (error) {
-    next(error);
-  }
-});
 
 router.post('/send-otps', async (req, res, next) => {
   try {
@@ -161,7 +97,6 @@ router.post('/send-otps', async (req, res, next) => {
     if (!phone || !email) {
       return res.status(500).json({ success: false, message: 'Super Admin contact config missing.' });
     }
-
     const phoneOtp = String(crypto.randomInt(100000, 999999));
     const gmailOtp = String(crypto.randomInt(100000, 999999));
     const expiresAt = new Date(Date.now() + 5 * 60 * 1000);
@@ -196,23 +131,31 @@ router.post('/send-otps', async (req, res, next) => {
     next(error);
   }
 });
-router.post('/verify-4-layer', async (req, res, next) => {
+
+router.post('/login-verify', async (req, res, next) => {
   try {
     const {
+      password,
       phoneOtp,
       firebaseIdToken,
       gmailOtp,
-      voiceSampleBase64,
-      voiceTranscript,
-      faceVideoBase64,
-      headMovements,
-      eyeBlinkDetected,
     } = req.body;
 
     const clientIp = req.cleanIp;
     const phone = String(process.env.SUPER_ADMIN_PHONE || '').trim();
     const email = String(process.env.SUPER_ADMIN_GMAIL || process.env.SMTP_USER || '').trim();
     const superAdminId = String(process.env.SUPER_ADMIN_ID || 'SA_2026_MASTER').trim();
+
+    let passwordPassed = false;
+    const securityDoc = SuperAdminSecurity
+      ? await SuperAdminSecurity.findOne({ superAdminId }).catch(() => null)
+      : null;
+
+    if (securityDoc && securityDoc.passwordHash) {
+      passwordPassed = await verifyPassword(password, securityDoc.passwordHash);
+    } else if (process.env.SUPER_ADMIN_PASSWORD) {
+      passwordPassed = String(password || '') === String(process.env.SUPER_ADMIN_PASSWORD).trim();
+    }
 
     let validPhoneOtp = null;
     let firebasePhonePassed = false;
@@ -238,38 +181,32 @@ router.post('/verify-4-layer', async (req, res, next) => {
       });
     }
 
-    const [validGmailOtp, voiceResult, faceResult] = await Promise.all([
-      OTP.findOne({
-        email,
-        code: String(gmailOtp || '').trim(),
-        purpose: 'SUPER_ADMIN_GMAIL',
-        verified: false,
-        expiresAt: { $gt: new Date() },
-      }),
-      verifyVoiceBiometric({ voiceSampleBase64, transcript: voiceTranscript }),
-      verifyFace3DBiometric({ faceVideoBase64, headMovements, eyeBlinkDetected }),
-    ]);
+    const validGmailOtp = await OTP.findOne({
+      email,
+      code: String(gmailOtp || '').trim(),
+      purpose: 'SUPER_ADMIN_GMAIL',
+      verified: false,
+      expiresAt: { $gt: new Date() },
+    });
 
     const layerStatus = {
+      passwordVerified: Boolean(passwordPassed),
       phoneOtp: Boolean(firebasePhonePassed || validPhoneOtp),
       gmailOtp: Boolean(validGmailOtp),
-      voiceVerified: Boolean(voiceResult && voiceResult.verified),
-      face3DVerified: Boolean(faceResult && faceResult.verified),
     };
-
-    if (!layerStatus.phoneOtp || !layerStatus.gmailOtp || !layerStatus.voiceVerified || !layerStatus.face3DVerified) {
+    if (!layerStatus.passwordVerified || !layerStatus.phoneOtp || !layerStatus.gmailOtp) {
       await AuditLog.create({
         user: superAdminId,
         role: 'SuperAdmin',
-        action: '4_LAYER_BIOMETRIC_VERIFY_FAILED',
-        category: 'BIOMETRIC_FAIL',
+        action: 'SUPER_ADMIN_LOGIN_FAILED',
+        category: 'SECURITY_FAIL',
         ipAddress: clientIp,
-        details: { layerStatus, voiceScore: voiceResult?.score || 0, faceScore: faceResult?.score || 0 },
+        details: { layerStatus },
       }).catch(() => {});
 
       return res.status(401).json({
         success: false,
-        message: '4-Layer verification failed. All 4 layers must pass.',
+        message: 'Login failed. Password, Phone OTP, and Gmail OTP must all pass.',
         layers: layerStatus,
       });
     }
@@ -291,14 +228,14 @@ router.post('/verify-4-layer', async (req, res, next) => {
     await AuditLog.create({
       user: superAdminId,
       role: 'SuperAdmin',
-      action: '4_LAYER_BIOMETRIC_VERIFY_SUCCESS',
+      action: 'SUPER_ADMIN_PASSWORD_2FA_LOGIN_SUCCESS',
       category: 'ADMIN',
       ipAddress: clientIp,
     }).catch(() => {});
 
     return res.status(200).json({
       success: true,
-      message: 'All 4 security layers verified. Dashboard unlocked.',
+      message: 'Password & 2FA verified. Super Admin Dashboard unlocked.',
       layers: layerStatus,
       superToken,
     });
@@ -306,6 +243,7 @@ router.post('/verify-4-layer', async (req, res, next) => {
     next(error);
   }
 });
+
 router.post('/hardware-recovery', async (req, res, next) => {
   try {
     const { hardwareKey, superAdminId } = req.body;
@@ -318,10 +256,9 @@ router.post('/hardware-recovery', async (req, res, next) => {
     }
 
     const recoveryLayers = {
+      passwordVerified: true,
       phoneOtp: true,
       gmailOtp: true,
-      voiceVerified: true,
-      face3DVerified: true,
       hardwareRecovery: true,
     };
 
@@ -361,6 +298,59 @@ router.get('/hide-status', (req, res) => {
 });
 
 router.use(verifySuperAdminToken);
+router.post('/change-password', async (req, res, next) => {
+  try {
+    const { currentPassword, newPassword } = req.body;
+    const superAdminId = String(process.env.SUPER_ADMIN_ID || 'SA_2026_MASTER').trim();
+
+    const strength = validatePasswordStrength(newPassword);
+    if (!strength.valid) {
+      return res.status(400).json({ success: false, message: strength.message });
+    }
+
+    let securityDoc = SuperAdminSecurity
+      ? await SuperAdminSecurity.findOne({ superAdminId }).catch(() => null)
+      : null;
+    let currentValid = false;
+
+    if (securityDoc && securityDoc.passwordHash) {
+      currentValid = await verifyPassword(currentPassword, securityDoc.passwordHash);
+    } else if (process.env.SUPER_ADMIN_PASSWORD) {
+      currentValid = String(currentPassword || '') === String(process.env.SUPER_ADMIN_PASSWORD).trim();
+    }
+
+    if (!currentValid) {
+      return res.status(401).json({ success: false, message: 'Current password is incorrect.' });
+    }
+
+    const newHash = await hashPassword(newPassword);
+    if (SuperAdminSecurity) {
+      if (!securityDoc) {
+        securityDoc = new SuperAdminSecurity({
+          superAdminId,
+          passwordHash: newHash,
+          passwordChangedAt: new Date(),
+        });
+      } else {
+        securityDoc.passwordHash = newHash;
+        securityDoc.passwordChangedAt = new Date();
+      }
+      await securityDoc.save();
+    }
+
+    await AuditLog.create({
+      user: superAdminId,
+      role: 'SuperAdmin',
+      action: 'SUPER_ADMIN_PASSWORD_CHANGED',
+      category: 'ADMIN',
+      ipAddress: req.cleanIp,
+    }).catch(() => {});
+
+    return res.status(200).json({ success: true, message: 'Super Admin password updated successfully.' });
+  } catch (error) {
+    next(error);
+  }
+});
 
 router.get('/dashboard', adminController.getDashboardStats || ((req, res) => res.json({ success: true })));
 
@@ -375,6 +365,7 @@ router.post(
       return res.json({ success: true, isHidden: Boolean(req.body.hide) });
     })
 );
+
 let savedGatewayConfig = {
   bkashMerchantNumber: process.env.BKASH_MERCHANT_NUMBER || '',
   bkashAppKey: process.env.BKASH_APP_KEY ? '********' : '',
@@ -399,16 +390,15 @@ router.get('/status', async (req, res, next) => {
     return res.status(200).json({
       success: true,
       system: {
-        appVersion: 'v3.0.0 LOCK',
+        appVersion: 'v3.8.0 ENTERPRISE',
         replicaStatus: 'Healthy (Primary + Secondary)',
         pitrStatus: 'Active (10m Incremental)',
         selfHealing: 'Online',
       },
       verifyLayers: {
+        passwordVerified: true,
         phoneOtp: true,
         gmailOtp: true,
-        liveVoice: true,
-        liveFace3D: true,
       },
       isHidden: Boolean(req.app.locals.systemConfig?.isHidden),
       killTargets,
