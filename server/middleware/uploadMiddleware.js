@@ -13,7 +13,7 @@ const storage = multer.memoryStorage();
 
 const ALLOWED_IMAGE_MIMES = ['image/jpeg', 'image/png', 'image/webp'];
 const ALLOWED_VIDEO_MIMES = ['video/mp4', 'video/webm', 'video/quicktime'];
-const ALLOWED_AUDIO_MIMES = ['audio/webm', 'audio/wav', 'audio/mpeg', 'audio/ogg'];
+const ALLOWED_AUDIO_MIMES = ['audio/webm', 'audio/wav', 'audio/mpeg', 'audio/mp3', 'audio/ogg', 'audio/mp4', 'audio/m4a', 'audio/aac'];
 
 const fileFilter = (req, file, cb) => {
   const allAllowed = [...ALLOWED_IMAGE_MIMES, ...ALLOWED_VIDEO_MIMES, ...ALLOWED_AUDIO_MIMES];
@@ -36,7 +36,7 @@ const uploadMemory = multer({
   storage,
   fileFilter,
   limits: {
-    fileSize: 15 * 1024 * 1024,
+    fileSize: 25 * 1024 * 1024,
   },
 });
 
@@ -48,10 +48,25 @@ const uploadAvatarMemory = multer({
   },
 });
 
-const verifyMagicBytes = (buffer) => {
+const verifyImageMagicBytes = (buffer) => {
   if (!buffer || buffer.length < 4) return false;
   const hex = buffer.toString('hex', 0, 4).toUpperCase();
   return hex.startsWith('FFD8FF') || hex === '89504E47' || hex === '52494646';
+};
+
+const verifyAudioVideoMagicBytes = (buffer) => {
+  if (!buffer || buffer.length < 8) return false;
+  const hex = buffer.toString('hex', 0, 8).toUpperCase();
+  const ascii4 = buffer.toString('ascii', 4, 8);
+  return (
+    ascii4 === 'ftyp' ||
+    hex.startsWith('1A45DFA3') ||
+    hex.startsWith('52494646') ||
+    hex.startsWith('494433') ||
+    hex.startsWith('FFFB') ||
+    hex.startsWith('FFF3') ||
+    hex.startsWith('4F676753')
+  );
 };
 
 const streamBufferToCloudinary = (buffer, folder, resourceType = 'image') => {
@@ -69,17 +84,18 @@ const streamBufferToCloudinary = (buffer, folder, resourceType = 'image') => {
     Readable.from(buffer).pipe(cloudStream);
   });
 };
-
 const processAndStreamToCloud = async (req, res, next) => {
   try {
     if (!req.file) return next();
 
     const isImage = ALLOWED_IMAGE_MIMES.includes(req.file.mimetype);
+    const isVideo = ALLOWED_VIDEO_MIMES.includes(req.file.mimetype);
+    const isAudio = ALLOWED_AUDIO_MIMES.includes(req.file.mimetype);
     let uploadBuffer = req.file.buffer;
     let resourceType = 'auto';
 
     if (isImage) {
-      if (!verifyMagicBytes(req.file.buffer)) {
+      if (!verifyImageMagicBytes(req.file.buffer)) {
         return res.status(400).json({
           success: false,
           message: 'Security Alert: File magic-byte signature does not match a valid image.',
@@ -93,9 +109,18 @@ const processAndStreamToCloud = async (req, res, next) => {
         .toBuffer();
 
       resourceType = 'image';
-    } else if (ALLOWED_VIDEO_MIMES.includes(req.file.mimetype)) {
+      req.uploadedMediaType = 'photo';
+    } else if (isVideo || isAudio) {
+      if (!verifyAudioVideoMagicBytes(req.file.buffer)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Security Alert: File magic-byte signature does not match valid audio/video.',
+        });
+      }
       resourceType = 'video';
+      req.uploadedMediaType = isVideo ? 'video' : 'voice';
     }
+
     const uploadResult = await streamBufferToCloudinary(
       uploadBuffer,
       'enterprise_paint_v3',
@@ -118,7 +143,7 @@ const processAvatarAndStreamToCloud = async (req, res, next) => {
   try {
     if (!req.file) return next();
 
-    if (!verifyMagicBytes(req.file.buffer)) {
+    if (!verifyImageMagicBytes(req.file.buffer)) {
       return res.status(400).json({
         success: false,
         message: 'Security Alert: Invalid avatar image file signature.',
@@ -149,10 +174,10 @@ const processAvatarAndStreamToCloud = async (req, res, next) => {
   }
 };
 
-const deleteCloudAsset = async (publicId) => {
+const deleteCloudAsset = async (publicId, resourceType = 'image') => {
   if (!publicId) return false;
   try {
-    await cloudinary.uploader.destroy(publicId);
+    await cloudinary.uploader.destroy(publicId, { resource_type: resourceType });
     return true;
   } catch (error) {
     console.error('[CLOUDINARY DELETE ERROR]:', error.message);
@@ -163,7 +188,7 @@ const deleteCloudAsset = async (publicId) => {
 module.exports = {
   uploadSingleImage: uploadMemory.single('photo'),
   uploadAvatarImage: uploadAvatarMemory.single('avatar'),
-  uploadBiometricMedia: uploadMemory.single('media'),
+  uploadMultiModalMedia: uploadMemory.single('media'),
   processAndStreamToCloud,
   processAvatarAndStreamToCloud,
   deleteCloudAsset,
