@@ -18,10 +18,39 @@ const paymentSchema = new mongoose.Schema(
       required: [true, 'Payment amount is required'],
       min: [1, 'Amount must be at least 1 BDT'],
     },
+    totalAmount: {
+      type: Number,
+      default: 0,
+    },
+    materialCost: {
+      type: Number,
+      default: 0,
+    },
+    vatAmount: {
+      type: Number,
+      default: 0,
+    },
+    netProfit: {
+      type: Number,
+      default: 0,
+    },
+    merchantCommission: {
+      type: Number,
+      default: 0,
+    },
+    dealerMargin: {
+      type: Number,
+      default: 0,
+    },
+    milestoneStage: {
+      type: String,
+      enum: ['30%', '40%', '30%', 'AddOn30', 'Full'],
+      default: '30%',
+    },
     paymentType: {
       type: String,
-      enum: ['Full', 'Advance30', 'Advance50', 'Remaining'],
-      default: 'Full',
+      enum: ['Full', 'Advance30', 'Advance40', 'Remaining30', 'Advance50', 'Remaining', 'AddOn30'],
+      default: 'Advance30',
     },
     method: {
       type: String,
@@ -31,7 +60,7 @@ const paymentSchema = new mongoose.Schema(
     trxId: {
       type: String,
       required: true,
-      unique: true, // Prevents Duplicate TrxID fraud
+      unique: true,
       trim: true,
     },
     status: {
@@ -40,7 +69,6 @@ const paymentSchema = new mongoose.Schema(
       default: 'Pending',
       index: true,
     },
-    // Auto Calculated Share Amounts in BDT
     mistriShareAmount: {
       type: Number,
       default: 0,
@@ -66,5 +94,14 @@ const paymentSchema = new mongoose.Schema(
     timestamps: true,
   }
 );
+
+paymentSchema.pre('save', function (next) {
+  if (!this.totalAmount && this.amount) this.totalAmount = this.amount;
+  if (!this.amount && this.totalAmount) this.amount = this.totalAmount;
+  if (!this.netProfit && this.totalAmount > 0) {
+    this.netProfit = Math.max(0, this.totalAmount - this.materialCost - this.vatAmount);
+  }
+  next();
+});
 
 module.exports = mongoose.model('Payment', paymentSchema);
