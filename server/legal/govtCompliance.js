@@ -1,7 +1,6 @@
 const Report = require('../models/Report');
-const { verifyNbrBin, calculateMushakVat } = require('../utils/govtUtils');
+const { getGovtFlags, verifyNbrBin, calculateMushakVat } = require('../utils/govtUtils');
 
-// 1. Bangladesh Labor Law & Safety Compliance Check
 const checkLaborLawCompliance = ({ dailySqftLoad = 450, dailyWorkHours = 8, workerAge = 22 }) => {
   const issues = [];
   if (workerAge < 18) issues.push('Child labor strictly prohibited under Bangladesh Labor Act.');
@@ -15,7 +14,6 @@ const checkLaborLawCompliance = ({ dailySqftLoad = 450, dailyWorkHours = 8, work
   };
 };
 
-// 2. BTRC SMS Compliance Filter (Supports Zero-Cost Firebase, Gmail & Telegram Providers)
 const checkBtrcSmsCompliance = (smsText = '', provider = 'FIREBASE_PHONE') => {
   const freeProviders = ['FIREBASE_PHONE', 'GMAIL_SMTP', 'TELEGRAM_BOT'];
   if (freeProviders.includes(provider)) {
@@ -37,8 +35,16 @@ const checkBtrcSmsCompliance = (smsText = '', provider = 'FIREBASE_PHONE') => {
   };
 };
 
-// 3. Auto-Create Police Report Dossier for Major Disputes / Fraud
 const autoCreatePoliceReport = async ({ disputeId, jobId, accusedUserId, summary, generatedBy = 'SYSTEM' }) => {
+  const flags = await getGovtFlags();
+  if (!flags.govtAuditEnabled) {
+    return {
+      skipped: true,
+      reason: 'GOVT_AUDIT_SWITCH_OFF',
+      message: 'Govt Audit Kill Switch is currently OFF. Police dossier generation bypassed.',
+    };
+  }
+
   const report = await Report.create({
     type: 'GOVT_POLICE_REPORT',
     data: {
@@ -56,10 +62,23 @@ const autoCreatePoliceReport = async ({ disputeId, jobId, accusedUserId, summary
   return report;
 };
 
+const runModularGovtCheck = async ({ binNumber = '', baseAmount = 0 }) => {
+  const flags = await getGovtFlags();
+  const binResult = await verifyNbrBin(binNumber);
+  const vatResult = await calculateMushakVat(baseAmount);
+
+  return {
+    flags,
+    binResult,
+    vatResult,
+  };
+};
+
 module.exports = {
   verifyNbrBin,
   calculateMushakVat,
   checkLaborLawCompliance,
   checkBtrcSmsCompliance,
   autoCreatePoliceReport,
+  runModularGovtCheck,
 };
