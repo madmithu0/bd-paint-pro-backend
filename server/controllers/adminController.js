@@ -1,16 +1,31 @@
 const crypto = require('crypto');
+const bcrypt = require('bcryptjs');
 const User = require('../models/User');
 const Job = require('../models/Job');
 const Payment = require('../models/Payment');
 const HackLog = require('../models/HackLog');
 const OTP = require('../models/OTP');
+const Dispute = require('../models/Dispute');
+const AuditLog = require('../models/AuditLog');
+const ServiceCategory = require('../models/ServiceCategory');
 const hideConfig = require('../config/hideConfig');
+const { generateSuperAdmin2FAToken } = require('../utils/tokenUtils');
 const { sendSuperAdminPhoneOtp, verifyFirebasePhoneToken } = require('../utils/smsUtils');
 const { sendSuperAdminGmailOtp } = require('../utils/emailUtils');
+const { broadcastServiceRateUpdate } = require('../infra/socketEngine');
 
 const generateSixDigitOtp = () => String(crypto.randomInt(100000, 999999));
 
-// 1. Get Super Admin Dashboard Overview
+const verifyConfiguredAdminPassword = async (password) => {
+  const inputPwd = String(password || '');
+  const envHash = String(process.env.SUPER_ADMIN_PASSWORD_HASH || '').trim();
+  const envPlain = String(process.env.SUPER_ADMIN_PASSWORD || '').trim();
+
+  if (envHash) return bcrypt.compare(inputPwd, envHash);
+  if (envPlain) return inputPwd === envPlain;
+  return false;
+};
+
 const getDashboardStats = async (req, res, next) => {
   try {
     const [totalUsers, totalMerchants, totalJobs, completedPayments, blockedAttacks] = await Promise.all([
@@ -26,7 +41,7 @@ const getDashboardStats = async (req, res, next) => {
 
     res.status(200).json({
       success: true,
-      versionLock: 'v3.0.0 SELF-HEALING LOCK',
+      versionLock: 'v3.8.0 PASSWORD + 2FA LOCK',
       stats: {
         totalUsers,
         totalMerchants,
@@ -40,7 +55,7 @@ const getDashboardStats = async (req, res, next) => {
         mongoReplicaSet: 'Healthy',
         pitrBackup: 'Active (10-Min Incremental)',
         selfHealingEngine: 'Active',
-        superAdmin4LayerVerify: 'Always Active (4/4 Green - Zero Cost Mode)',
+        superAdminAuthMode: 'Password + Phone/Gmail 2FA OTP (Biometrics Removed)',
       },
     });
   } catch (error) {
@@ -48,15 +63,138 @@ const getDashboardStats = async (req, res, next) => {
   }
 };
 
-// 2. Verify Merchant / Mistri / Agent Account
+const superAdminLoginWithPassword = async (req, res, next) => {
+  try {
+    const { superAdminId, password } = req.body;
+    const configuredId = String(process.env.SUPER_ADMIN_ID || '').trim();
+
+    if (!configuredId || String(superAdminId || '').trim() !== configuredId) {
+      return res.status(401).json({ success: false, message: 'Invalid Super Admin credentials.' });
+    }
+
+    const isPasswordValid = await verifyConfiguredAdminPassword(password);
+    if (!isPasswordValid) {
+      await AuditLog.create({
+        user: configuredId,
+        role: 'SuperAdmin',
+        action: 'SUPER_ADMIN_FAILED_PASSWORD_LOGIN',
+        category: 'ADMIN',
+        ipAddress: req.clientIp || req.ip,
+      }).catch(() => {});
+      return res.status(401).json({ success: false, message: 'Invalid Super Admin password.' });
+    }
+
+    const adminPhone = String(process.env.SUPER_ADMIN_PHONE || '').trim();
+    const adminGmail = String(process.env.SUPER_ADMIN_GMAIL || process.env.SMTP_USER || '').trim().toLowerCase();
+
+    const phoneOtpCode = generateSixDigitOtp();
+    const gmailOtpCode = generateSixDigitOtp();
+
+    await OTP.deleteMany({ purpose: { $in: ['SUPER_ADMIN_PHONE', 'SUPER_ADMIN_GMAIL', 'SUPER_ADMIN_2FA'] } });
+    await OTP.create([
+      { phone: adminPhone, code: phoneOtpCode, provider: 'TELEGRAM_BOT', purpose: 'SUPER_ADMIN_PHONE' },
+      { email: adminGmail, code: gmailOtpCode, provider: 'GMAIL_SMTP', purpose: 'SUPER_ADMIN_GMAIL' },
+    ]);
+
+    await Promise.all([
+      sendSuperAdminPhoneOtp(phoneOtpCode).catch(() => {}),
+      sendSuperAdminGmailOtp(gmailOtpCode).catch(() => {}),
+    ]);
+
+    return res.status(200).json({
+      success: true,
+      step: '2FA_OTP_REQUIRED',
+      message: 'Password verified. Enter Phone (Telegram/Firebase) and Gmail 2FA OTPs to complete login.',
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+const verifySuperAdmin2FA = async (req, res, next) => {
+  try {
+    const { superAdminId, phoneOtp, gmailOtp, firebaseIdToken } = req.body;
+    const configuredId = String(process.env.SUPER_ADMIN_ID || '').trim();
+
+    if (!configuredId || String(superAdminId || configuredId).trim() !== configuredId) {
+      return res.status(401).json({ success: false, message: 'Invalid Super Admin ID.' });
+    }
+
+    let phoneOk = false;
+    let gmailOk = false;
+
+    if (firebaseIdToken) {
+      const fbCheck = await verifyFirebasePhoneToken(firebaseIdToken);
+      if (fbCheck.verified) phoneOk = true;
+    } else if (phoneOtp) {
+      const phoneRecord = await OTP.findOne({
+        purpose: { $in: ['SUPER_ADMIN_PHONE', 'SUPER_ADMIN_2FA'] },
+        code: String(phoneOtp).trim(),
+        verified: false,
+        expiresAt: { $gt: new Date() },
+      }).sort({ createdAt: -1 });
+      if (phoneRecord) {
+        phoneRecord.verified = true;
+        await phoneRecord.save();
+        phoneOk = true;
+      }
+    }
+
+    if (gmailOtp) {
+      const gmailRecord = await OTP.findOne({
+        purpose: { $in: ['SUPER_ADMIN_GMAIL', 'SUPER_ADMIN_2FA'] },
+        code: String(gmailOtp).trim(),
+        verified: false,
+        expiresAt: { $gt: new Date() },
+      }).sort({ createdAt: -1 });
+      if (gmailRecord) {
+        gmailRecord.verified = true;
+        await gmailRecord.save();
+        gmailOk = true;
+      }
+    }
+
+    if (!phoneOk || !gmailOk) {
+      return res.status(401).json({
+        success: false,
+        phoneVerified: phoneOk,
+        gmailVerified: gmailOk,
+        message: 'Both Phone and Gmail 2FA OTPs must be verified.',
+      });
+    }
+
+    const token = generateSuperAdmin2FAToken({
+      superAdminId: configuredId,
+      clientIp: req.clientIp || req.ip,
+      layers: { phoneOtp: true, gmailOtp: true },
+    });
+
+    await AuditLog.create({
+      user: configuredId,
+      role: 'SuperAdmin',
+      action: 'SUPER_ADMIN_2FA_LOGIN_SUCCESS',
+      category: 'AUTH',
+      ipAddress: req.clientIp || req.ip,
+    }).catch(() => {});
+
+    return res.status(200).json({
+      success: true,
+      message: 'Super Admin Password + 2FA session verified.',
+      token,
+      accessToken: token,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 const verifyAccount = async (req, res, next) => {
   try {
     const { userId, verifyStatus = true } = req.body;
     const user = await User.findByIdAndUpdate(
       userId,
-      { verify: Boolean(verifyStatus), active: true },
+      { verify: Boolean(verifyStatus), active: true, accountStatus: 'Active' },
       { new: true }
-    ).select('-password');
+    ).select('-passwordHash');
 
     if (!user) return res.status(404).json({ success: false, message: 'User not found.' });
 
@@ -69,8 +207,6 @@ const verifyAccount = async (req, res, next) => {
     next(error);
   }
 };
-
-// 3. Activate / Suspend / Change Role of Any User (SuperAdmin excluded from list)
 const manageUserAccount = async (req, res, next) => {
   try {
     const { userId, active, suspended, role, blockReason } = req.body;
@@ -79,9 +215,12 @@ const manageUserAccount = async (req, res, next) => {
     if (!user) return res.status(404).json({ success: false, message: 'User not found.' });
 
     if (active !== undefined) user.active = Boolean(active);
-    if (suspended !== undefined) user.suspended = Boolean(suspended);
+    if (suspended !== undefined) {
+      user.suspended = Boolean(suspended);
+      user.accountStatus = user.suspended ? 'Suspended' : 'Active';
+    }
     if (blockReason !== undefined) user.blockReason = blockReason;
-    if (role && ['Customer', 'Mistri', 'Agent', 'Merchant'].includes(role)) {
+    if (role && ['Customer', 'Mistri', 'Agent', 'Merchant', 'Admin'].includes(role)) {
       user.role = role;
     }
 
@@ -104,19 +243,28 @@ const manageUserAccount = async (req, res, next) => {
   }
 };
 
-// 4. Super Admin Force Password Reset for Any User
 const adminResetUserPassword = async (req, res, next) => {
   try {
     const { userId, newPassword } = req.body;
-    if (!newPassword || newPassword.length < 6) {
-      return res.status(400).json({ success: false, message: 'Password must be at least 6 characters.' });
+    if (!newPassword || newPassword.length < 8) {
+      return res.status(400).json({ success: false, message: 'Password must be at least 8 characters.' });
     }
 
-    const user = await User.findById(userId).select('+password');
+    const user = await User.findById(userId).select('+passwordHash');
     if (!user) return res.status(404).json({ success: false, message: 'User not found.' });
 
-    user.password = newPassword;
+    user.passwordHash = newPassword;
+    user.failedLoginAttempts = 0;
+    user.lockUntil = null;
     await user.save();
+
+    await AuditLog.create({
+      user: String(user._id),
+      role: 'SuperAdmin',
+      action: 'SUPER_ADMIN_FORCE_PASSWORD_RESET',
+      category: 'PASSWORD_RESET',
+      ipAddress: req.clientIp || req.ip,
+    }).catch(() => {});
 
     res.status(200).json({
       success: true,
@@ -127,7 +275,149 @@ const adminResetUserPassword = async (req, res, next) => {
   }
 };
 
-// 5. Toggle Super Admin Hide / Unhide Control
+const updateServiceCategoryRate = async (req, res, next) => {
+  try {
+    const {
+      categoryId,
+      labourRatePerSqft,
+      withMaterialRatePerSqft,
+      slotSqftPerDay,
+      perCoatRateMultiplier,
+      isActive,
+    } = req.body;
+
+    const category = await ServiceCategory.findById(categoryId);
+    if (!category) {
+      return res.status(404).json({ success: false, message: 'Service category not found.' });
+    }
+
+    if (labourRatePerSqft !== undefined) category.labourRatePerSqft = Number(labourRatePerSqft);
+    if (withMaterialRatePerSqft !== undefined) category.withMaterialRatePerSqft = Number(withMaterialRatePerSqft);
+    if (slotSqftPerDay !== undefined) category.slotSqftPerDay = Math.max(50, Number(slotSqftPerDay));
+    if (perCoatRateMultiplier !== undefined) category.perCoatRateMultiplier = Number(perCoatRateMultiplier);
+    if (isActive !== undefined) category.isActive = Boolean(isActive);
+
+    await category.save();
+
+    await AuditLog.create({
+      user: String(req.user?.id || 'SUPER_ADMIN'),
+      role: 'SuperAdmin',
+      action: `UPDATED_SERVICE_RATE [${category.code}]`,
+      category: 'RATE_UPDATE',
+      ipAddress: req.clientIp || req.ip,
+      details: {
+        categoryId: category._id,
+        labourRatePerSqft: category.labourRatePerSqft,
+        withMaterialRatePerSqft: category.withMaterialRatePerSqft,
+        slotSqftPerDay: category.slotSqftPerDay,
+      },
+    }).catch(() => {});
+
+    broadcastServiceRateUpdate({ categoryId: category._id, code: category.code, updatedAt: new Date() });
+
+    return res.status(200).json({
+      success: true,
+      message: `Rates updated live for ${category.name}.`,
+      category,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+const updateRoleLegalTerms = async (req, res, next) => {
+  try {
+    const { targetRole, versionLabel, termsContent, commissionClause = '' } = req.body;
+    const validRoles = ['Customer', 'Mistri', 'Agent', 'Merchant'];
+
+    if (!validRoles.includes(targetRole) || !termsContent) {
+      return res.status(400).json({
+        success: false,
+        message: 'Valid targetRole (Customer, Mistri, Agent, Merchant) and termsContent are required.',
+      });
+    }
+
+    await AuditLog.create({
+      user: String(req.user?.id || 'SUPER_ADMIN'),
+      role: 'SuperAdmin',
+      action: `EDITED_ROLE_TERMS [${targetRole}]`,
+      category: 'ROLE_TERMS_EDIT',
+      ipAddress: req.clientIp || req.ip,
+      isImmutableLock: true,
+      details: {
+        targetRole,
+        versionLabel: versionLabel || 'v3.8.0-CUSTOM',
+        termsContent,
+        commissionClause,
+      },
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: `Terms & Conditions updated live for ${targetRole}.`,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+const issueLegalNotice = async (req, res, next) => {
+  try {
+    const { disputeId, againstUserId, violationType = 'OffPlatformPoaching', noticeSummary, suspendAccount = true } = req.body;
+
+    if (!againstUserId || !noticeSummary) {
+      return res.status(400).json({
+        success: false,
+        message: 'againstUserId and noticeSummary are required to issue a legal notice.',
+      });
+    }
+
+    const noticeRef = `LGL-${Date.now().toString().slice(-6)}-${crypto.randomInt(100, 999)}`;
+
+    if (disputeId) {
+      await Dispute.findByIdAndUpdate(disputeId, {
+        $set: {
+          againstUser: againstUserId,
+          violationType,
+          severity: 'Critical',
+          legalNoticeIssued: true,
+          legalNoticeRef: noticeRef,
+          legalNoticeIssuedAt: new Date(),
+          status: 'EscalatedLegal',
+        },
+      });
+    }
+
+    if (suspendAccount) {
+      await User.findByIdAndUpdate(againstUserId, {
+        $set: {
+          suspended: true,
+          active: false,
+          accountStatus: 'Suspended',
+          penaltyStatus: 'Suspended',
+          blockReason: `Legal Notice Issued (${noticeRef}): ${violationType}`,
+        },
+      });
+    }
+
+    await AuditLog.create({
+      user: String(againstUserId),
+      role: 'SuperAdmin',
+      action: `ISSUED_LEGAL_NOTICE [${noticeRef}]`,
+      category: 'LEGAL_NOTICE',
+      ipAddress: req.clientIp || req.ip,
+      isImmutableLock: true,
+      details: { disputeId, againstUserId, violationType, noticeRef, noticeSummary },
+    });
+
+    return res.status(200).json({
+      success: true,
+      noticeRef,
+      message: `Legal notice (${noticeRef}) issued and recorded in immutable audit log.`,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
 const toggleHideMode = (req, res) => {
   const { isHidden, autoHideEnabled } = req.body;
 
@@ -143,7 +433,7 @@ const toggleHideMode = (req, res) => {
     hideStatus: hideConfig.getStatus(),
   });
 };
-// 6. Send Zero-Cost Layer-1 (Telegram/Firebase) & Layer-2 (Gmail) OTPs for Super Admin
+
 const sendSuperAdminFreeOtps = async (req, res, next) => {
   try {
     const adminPhone = String(process.env.SUPER_ADMIN_PHONE || '').trim();
@@ -186,71 +476,20 @@ const sendSuperAdminFreeOtps = async (req, res, next) => {
   }
 };
 
-// 7. Verify Super Admin Layer-1 & Layer-2 Free OTPs
 const verifySuperAdminFreeOtps = async (req, res, next) => {
-  try {
-    const { phoneOtp, gmailOtp, firebaseIdToken } = req.body;
-    let layer1Green = false;
-    let layer2Green = false;
-
-    // Layer 1: Check either Telegram OTP OR Firebase Phone ID Token
-    if (firebaseIdToken) {
-      const fbCheck = await verifyFirebasePhoneToken(firebaseIdToken);
-      if (fbCheck.verified) layer1Green = true;
-    } else if (phoneOtp) {
-      const phoneRecord = await OTP.findOne({
-        purpose: 'SUPER_ADMIN_PHONE',
-        code: String(phoneOtp).trim(),
-        verified: false,
-      }).sort({ createdAt: -1 });
-
-      if (phoneRecord) {
-        phoneRecord.verified = true;
-        await phoneRecord.save();
-        layer1Green = true;
-      }
-    }
-
-    // Layer 2: Check Gmail SMTP OTP
-    if (gmailOtp) {
-      const gmailRecord = await OTP.findOne({
-        purpose: 'SUPER_ADMIN_GMAIL',
-        code: String(gmailOtp).trim(),
-        verified: false,
-      }).sort({ createdAt: -1 });
-
-      if (gmailRecord) {
-        gmailRecord.verified = true;
-        await gmailRecord.save();
-        layer2Green = true;
-      }
-    }
-
-    if (!layer1Green || !layer2Green) {
-      return res.status(401).json({
-        success: false,
-        layer1Green,
-        layer2Green,
-        message: 'Layer-1 (Phone/Telegram) or Layer-2 (Gmail) OTP verification failed.',
-      });
-    }
-
-    res.status(200).json({
-      success: true,
-      layer1Green: true,
-      layer2Green: true,
-      message: 'Layer 1 & Layer 2 verified at zero cost.',
-    });
-  } catch (error) {
-    next(error);
-  }
+  return verifySuperAdmin2FA(req, res, next);
 };
 
 module.exports = {
   getDashboardStats,
+  superAdminLoginWithPassword,
+  verifySuperAdmin2FA,
   verifyAccount,
   manageUserAccount,
   adminResetUserPassword,
+  updateServiceCategoryRate,
+  updateRoleLegalTerms,
+  issueLegalNotice,
   toggleHideMode,
   sendSuperAdminFreeOtps,
   verifySuperAdminFreeOtps,
