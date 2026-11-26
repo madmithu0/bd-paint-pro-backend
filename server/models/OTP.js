@@ -2,6 +2,15 @@ const mongoose = require('mongoose');
 
 const otpSchema = new mongoose.Schema(
   {
+    userId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+      default: null,
+    },
+    referenceId: {
+      type: String,
+      default: null,
+    },
     phone: {
       type: String,
       trim: true,
@@ -17,11 +26,11 @@ const otpSchema = new mongoose.Schema(
     },
     code: {
       type: String,
-      default: null, // Optional when verified directly via Firebase ID Token
+      default: null,
     },
     provider: {
       type: String,
-      enum: ['FIREBASE_PHONE', 'GMAIL_SMTP', 'TELEGRAM_BOT', 'LOCAL'],
+      enum: ['FIREBASE_PHONE', 'GMAIL_SMTP', 'TELEGRAM_BOT', 'SMS_GATEWAY', 'LOCAL'],
       default: 'GMAIL_SMTP',
     },
     firebaseUid: {
@@ -30,7 +39,19 @@ const otpSchema = new mongoose.Schema(
     },
     purpose: {
       type: String,
-      enum: ['LOGIN', 'SIGNUP', 'FORGOT_PASSWORD', 'SUPER_ADMIN_PHONE', 'SUPER_ADMIN_GMAIL', 'CONTRACT_SIGN'],
+      enum: [
+        'LOGIN',
+        'SIGNUP',
+        'FORGOT_PASSWORD',
+        'PASSWORD_RESET',
+        'WALLET_VERIFY',
+        'MATERIAL_MEMO',
+        'ADDON_CONTRACT',
+        'SUPER_ADMIN_PHONE',
+        'SUPER_ADMIN_GMAIL',
+        'SUPER_ADMIN_2FA',
+        'CONTRACT_SIGN',
+      ],
       default: 'LOGIN',
     },
     attempts: {
@@ -44,8 +65,8 @@ const otpSchema = new mongoose.Schema(
     expiresAt: {
       type: Date,
       required: true,
-      default: () => new Date(Date.now() + 5 * 60 * 1000), // 5 minutes validity
-      index: { expires: 0 }, // MongoDB TTL index automatically deletes expired OTPs
+      default: () => new Date(Date.now() + 5 * 60 * 1000),
+      index: { expires: 0 },
     },
   },
   {
