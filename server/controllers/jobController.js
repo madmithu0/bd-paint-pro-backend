@@ -1,14 +1,19 @@
 const crypto = require('crypto');
 const Job = require('../models/Job');
 const User = require('../models/User');
+const AgentLead = require('../models/AgentLead');
 const ServiceCategory = require('../models/ServiceCategory');
 const { calculateJobPriceAndDays } = require('../utils/priceUtils');
+const { extractSlotIntent } = require('../utils/aiMeasureUtils');
 const { maskMistriContactIfUnpaid } = require('../middleware/advancePaymentGate');
 
 const createJob = async (req, res, next) => {
   try {
     const {
       selectedServices = [],
+      inputMedia = [],
+      customerSelectedMistris = [],
+      customJobDescription = '',
       sqft,
       materialSource = 'Platform',
       isMistriOnly = false,
@@ -28,16 +33,21 @@ const createJob = async (req, res, next) => {
     let totalSlots = 0;
     let allMistriOnly = Boolean(isMistriOnly) || materialSource === 'CustomerOwn';
 
+    if ((!Array.isArray(selectedServices) || selectedServices.length === 0) && numericSqft <= 0) {
+      const voiceOrText =
+        (Array.isArray(inputMedia) && inputMedia.find((m) => m.transcribedText)?.transcribedText) ||
+        customJobDescription;
+      if (voiceOrText) {
+        const extracted = extractSlotIntent({ text: voiceOrText, defaultSqft: 0 });
+        if (extracted.detectedSqft > 0) numericSqft = extracted.detectedSqft;
+        if (extracted.isMistriOnly) allMistriOnly = true;
+      }
+    }
+
     if (Array.isArray(selectedServices) && selectedServices.length > 0) {
       const serviceIds = selectedServices.map((item) => item.serviceId);
-      const dbCategories = await ServiceCategory.find({
-        _id: { $in: serviceIds },
-        isActive: true,
-      });
-
-      const categoryMap = new Map(
-        dbCategories.map((cat) => [String(cat._id), cat])
-      );
+      const dbCategories = await ServiceCategory.find({ _id: { $in: serviceIds }, isActive: true });
+      const categoryMap = new Map(dbCategories.map((cat) => [String(cat._id), cat]));
 
       allMistriOnly = true;
       numericSqft = 0;
@@ -45,45 +55,37 @@ const createJob = async (req, res, next) => {
       for (const item of selectedServices) {
         const cat = categoryMap.get(String(item.serviceId));
         if (!cat) {
-          return res.status(400).json({
-            success: false,
-            message: 'One or more selected services are currently unavailable.',
-          });
+          return res.status(400).json({ success: false, message: 'One or more selected services are unavailable.' });
         }
 
         const itemMistriOnly = Boolean(item.isMistriOnly);
         if (itemMistriOnly && !cat.isLabourOnlyEnabled) {
-          return res.status(400).json({
-            success: false,
-            message: `Labour-only option is disabled for ${cat.name}.`,
-          });
+          return res.status(400).json({ success: false, message: `Labour-only option is disabled for ${cat.name}.` });
         }
         if (!itemMistriOnly && !cat.isWithMaterialEnabled) {
-          return res.status(400).json({
-            success: false,
-            message: `With-material option is disabled for ${cat.name}.`,
-          });
+          return res.status(400).json({ success: false, message: `With-material option is disabled for ${cat.name}.` });
         }
 
-        const est = cat.calculateEstimate(item.sqft, itemMistriOnly);
+        const est = cat.calculateEstimate(item.sqft, itemMistriOnly, item.coatCount);
         if (est.sqft <= 0) {
-          return res.status(400).json({
-            success: false,
-            message: `Valid Sqft is required for ${cat.name}.`,
-          });
+          return res.status(400).json({ success: false, message: `Valid Sqft is required for ${cat.name}.` });
         }
 
         resolvedServices.push({
           serviceId: cat._id,
           code: cat.code,
           name: cat.name,
+          serviceName: cat.name,
           sqft: est.sqft,
+          coatCount: Number(item.coatCount) || cat.defaultCoats || 2,
           isMistriOnly: itemMistriOnly,
+          paintBrand: item.paintBrand || '',
           slotSqftPerDay: cat.slotSqftPerDay,
           calculatedSlots: est.calculatedSlots,
           appliedRate: est.appliedRate,
           subTotal: est.subTotal,
           estimatedMaterialCost: est.estimatedMaterialCost,
+          addedMidJob: false,
         });
 
         numericSqft += est.sqft;
@@ -114,13 +116,46 @@ const createJob = async (req, res, next) => {
       totalSlots = legacyEstimate.totalDays;
     }
 
-    const finalMistriCount = Math.max(1, Number(mistriCount) || Math.ceil(totalSlots / 5) || 1);
+    let resolvedAgentId = agentId || (req.user.role === 'Agent' ? req.user.id : null);
+    if (!resolvedAgentId && req.user.phone) {
+      const activeLead = await AgentLead.findOne({
+        customerPhone: req.user.phone,
+        lockExpiryDate: { $gt: new Date() },
+      }).lean();
+      if (activeLead && activeLead.agentId) {
+        resolvedAgentId = activeLead.agentId;
+      }
+    }
+
+    let validatedManualMistris = [];
+    let preAssignedMistriIds = [];
+    if (Array.isArray(customerSelectedMistris) && customerSelectedMistris.length > 0) {
+      const requestedIds = customerSelectedMistris.map((m) => m.mistriId || m._id || m).filter(Boolean);
+      const dbMistris = await User.find({
+        _id: { $in: requestedIds },
+        role: 'Mistri',
+        active: true,
+        suspended: false,
+      }).select('_id name');
+
+      validatedManualMistris = dbMistris.map((m) => ({ mistriId: m._id, mistriName: m.name }));
+      preAssignedMistriIds = dbMistris.map((m) => m._id);
+    }
+
+    const finalMistriCount =
+      preAssignedMistriIds.length > 0
+        ? preAssignedMistriIds.length
+        : Math.max(1, Number(mistriCount) || Math.ceil(totalSlots / 5) || 1);
     const calculatedDays = Number((totalSlots / finalMistriCount).toFixed(2));
 
     const job = await Job.create({
       customer: req.user.id,
-      agent: agentId || (req.user.role === 'Agent' ? req.user.id : null),
+      agent: resolvedAgentId,
+      assignedMistri: preAssignedMistriIds,
+      customerSelectedMistris: validatedManualMistris,
+      customJobDescription: String(customJobDescription || '').trim(),
       selectedServices: resolvedServices,
+      inputMedia: Array.isArray(inputMedia) ? inputMedia : [],
       sqft: numericSqft,
       price: totalBill,
       materialSource: allMistriOnly ? 'CustomerOwn' : materialSource,
@@ -161,7 +196,6 @@ const createJob = async (req, res, next) => {
     next(error);
   }
 };
-
 const getJobList = async (req, res, next) => {
   try {
     const { status, page = 1, limit = 20 } = req.query;
@@ -185,7 +219,7 @@ const getJobList = async (req, res, next) => {
     ]);
 
     const jobs = rawJobs.map((j) => {
-      const isAdvancePaid = Boolean(j.milestoneStages && j.milestoneStages.stage1Paid);
+      const isAdvancePaid = Boolean(j.milestone1Paid || (j.milestoneStages && j.milestoneStages.stage1Paid));
       if (Array.isArray(j.assignedMistri)) {
         j.assignedMistri = j.assignedMistri.map((m) =>
           maskMistriContactIfUnpaid(m, isAdvancePaid)
@@ -204,6 +238,7 @@ const getJobList = async (req, res, next) => {
     next(error);
   }
 };
+
 const getJobDetails = async (req, res, next) => {
   try {
     const job = await Job.findById(req.params.id)
@@ -218,7 +253,7 @@ const getJobDetails = async (req, res, next) => {
     }
 
     const isAdvancePaid = Boolean(
-      job.milestoneStages && job.milestoneStages.stage1Paid
+      job.milestone1Paid || (job.milestoneStages && job.milestoneStages.stage1Paid)
     );
 
     if (Array.isArray(job.assignedMistri)) {
@@ -256,7 +291,6 @@ const assignJob = async (req, res, next) => {
     if (!job) {
       return res.status(404).json({ success: false, message: 'Job not found.' });
     }
-
     if (mistriIds.length > 0) {
       const validMistris = await User.find({
         _id: { $in: mistriIds },
@@ -293,6 +327,64 @@ const assignJob = async (req, res, next) => {
   }
 };
 
+const addMidJobService = async (req, res, next) => {
+  try {
+    const { serviceId, sqft, coatCount = 2, isMistriOnly = false, paintBrand = '' } = req.body;
+    const job = await Job.findById(req.params.id);
+
+    if (!job || ['Completed', 'Cancelled'].includes(job.status)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Mid-job add-on can only be appended to an active job.',
+      });
+    }
+
+    const cat = await ServiceCategory.findById(serviceId);
+    if (!cat || !cat.isActive) {
+      return res.status(404).json({ success: false, message: 'Selected service category is unavailable.' });
+    }
+
+    const est = cat.calculateEstimate(sqft, Boolean(isMistriOnly), coatCount);
+    if (est.sqft <= 0) {
+      return res.status(400).json({ success: false, message: 'Valid Sqft is required for add-on service.' });
+    }
+
+    job.selectedServices.push({
+      serviceId: cat._id,
+      code: cat.code,
+      name: cat.name,
+      serviceName: cat.name,
+      sqft: est.sqft,
+      coatCount: Number(coatCount) || cat.defaultCoats || 2,
+      isMistriOnly: Boolean(isMistriOnly),
+      paintBrand: String(paintBrand || '').trim(),
+      slotSqftPerDay: cat.slotSqftPerDay,
+      calculatedSlots: est.calculatedSlots,
+      appliedRate: est.appliedRate,
+      subTotal: est.subTotal,
+      estimatedMaterialCost: est.estimatedMaterialCost,
+      addedMidJob: true,
+    });
+
+    await job.save();
+
+    const supplementaryAdvance30 = Math.round(est.subTotal * 0.30);
+
+    return res.status(200).json({
+      success: true,
+      message: 'Mid-job add-on service appended successfully.',
+      addedService: {
+        serviceName: cat.name,
+        sqft: est.sqft,
+        subTotal: est.subTotal,
+        supplementaryAdvance30,
+      },
+      job,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
 const updateJobStatus = async (req, res, next) => {
   try {
     const { status, otp, cancelReason } = req.body;
@@ -338,5 +430,6 @@ module.exports = {
   getJobList,
   getJobDetails,
   assignJob,
+  addMidJobService,
   updateJobStatus,
 };
