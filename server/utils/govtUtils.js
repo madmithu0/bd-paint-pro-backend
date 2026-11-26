@@ -1,7 +1,36 @@
 const axios = require('axios');
+const Kill = require('../models/Kill');
 
-// Verify NBR BIN (Business Identification Number)
+const getGovtFlags = async () => {
+  try {
+    const govtConfig = await Kill.findOne({ killType: 'GOVT' }).lean();
+    return (
+      govtConfig?.govtFeatureFlags || {
+        autoVatEnabled: false,
+        nbrBinMandateEnabled: false,
+        govtAuditEnabled: false,
+      }
+    );
+  } catch (err) {
+    return {
+      autoVatEnabled: false,
+      nbrBinMandateEnabled: false,
+      govtAuditEnabled: false,
+    };
+  }
+};
+
 const verifyNbrBin = async (binNumber, companyName = '') => {
+  const flags = await getGovtFlags();
+  if (!flags.nbrBinMandateEnabled) {
+    return {
+      valid: true,
+      bypassed: true,
+      binNumber: String(binNumber || '').trim(),
+      status: 'NBR_BIN_MANDATE_OFF',
+    };
+  }
+
   const cleanBin = String(binNumber).replace(/\D/g, '');
   if (cleanBin.length < 9 || cleanBin.length > 13) {
     return {
@@ -11,7 +40,6 @@ const verifyNbrBin = async (binNumber, companyName = '') => {
     };
   }
 
-  // Call Live NBR API if configured, otherwise validate structure
   if (process.env.NBR_BIN_API_URL && process.env.NBR_BIN_API_KEY) {
     try {
       const res = await axios.get(`${process.env.NBR_BIN_API_URL}/${cleanBin}`, {
@@ -33,9 +61,21 @@ const verifyNbrBin = async (binNumber, companyName = '') => {
   };
 };
 
-// Calculate Bangladesh Mushak VAT (Default 15%)
-const calculateMushakVat = (baseAmount, vatRate = 15) => {
-  const amount = Number(baseAmount);
+const calculateMushakVat = async (baseAmount, vatRate = 15, forceEnabled = null) => {
+  const amount = Number(baseAmount) || 0;
+  const flags = forceEnabled === null ? await getGovtFlags() : { autoVatEnabled: Boolean(forceEnabled) };
+
+  if (!flags.autoVatEnabled) {
+    return {
+      baseAmount: amount,
+      vatRatePercent: 0,
+      vatAmount: 0,
+      totalWithVat: amount,
+      vatApplied: false,
+      currency: 'BDT',
+    };
+  }
+
   const vatAmount = Number(((amount * vatRate) / 100).toFixed(2));
   const totalWithVat = Number((amount + vatAmount).toFixed(2));
 
@@ -44,18 +84,32 @@ const calculateMushakVat = (baseAmount, vatRate = 15) => {
     vatRatePercent: vatRate,
     vatAmount,
     totalWithVat,
+    vatApplied: true,
     currency: 'BDT',
   };
 };
 
-// Boot-time Govt Compliance Verification
+const generateGovtComplianceReport = async ({ totalRevenue = 0, totalVatCollected = 0, period = 'Monthly' }) => {
+  const flags = await getGovtFlags();
+  return {
+    period,
+    flagsSnapshot: flags,
+    totalRevenue: Number(totalRevenue),
+    totalVatCollected: flags.autoVatEnabled ? Number(totalVatCollected) : 0,
+    generatedAt: new Date().toISOString(),
+  };
+};
+
 const verifyGovtCompliance = async () => {
-  console.log('🏛️  [GOVT COMPLIANCE] NBR BIN, Mushak VAT & BTRC SMS Policies Verified');
+  const flags = await getGovtFlags();
+  console.log(`[GOVT COMPLIANCE] Modular Flags Loaded -> AutoVAT: ${flags.autoVatEnabled}, NBR: ${flags.nbrBinMandateEnabled}`);
   return true;
 };
 
 module.exports = {
+  getGovtFlags,
   verifyNbrBin,
   calculateMushakVat,
+  generateGovtComplianceReport,
   verifyGovtCompliance,
 };
