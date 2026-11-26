@@ -22,8 +22,12 @@ const auditLogSchema = new mongoose.Schema(
         'AUTH',
         'PASSWORD_RESET',
         'VERSION_CHANGE',
-        'BIOMETRIC_FAIL',
-        'BIOMETRIC_LOCK',
+        'RATE_UPDATE',
+        'KILL_SWITCH',
+        'ROLE_TERMS_EDIT',
+        'WALLET_VERIFY',
+        'PAYOUT',
+        'LEGAL_NOTICE',
         'HIDE_TOGGLE',
         'PAYMENT',
         'ADMIN',
@@ -59,17 +63,12 @@ const auditLogSchema = new mongoose.Schema(
   }
 );
 
-// Lifetime Protection: Prevent modification or deletion of locked master biometric records
 auditLogSchema.pre(
   ['updateOne', 'updateMany', 'findOneAndUpdate', 'deleteOne', 'deleteMany', 'findOneAndDelete'],
   function (next) {
     const query = this.getQuery() || {};
-    if (
-      query.isImmutableLock === true ||
-      query.action === 'SUPER_ADMIN_MASTER_VOICE_LOCKED' ||
-      query.category === 'BIOMETRIC_LOCK'
-    ) {
-      return next(new Error('SECURITY VIOLATION: Lifetime locked biometric record cannot be modified or deleted.'));
+    if (query.isImmutableLock === true) {
+      return next(new Error('SECURITY VIOLATION: Immutable audit log record cannot be modified or deleted.'));
     }
     next();
   }
