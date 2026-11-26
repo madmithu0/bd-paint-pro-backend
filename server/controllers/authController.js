@@ -446,3 +446,74 @@ const resetPassword = async (req, res, next) => {
     next(error);
   }
 };
+const acceptRoleTerms = async (req, res, next) => {
+  try {
+    const { termsAccepted = true, merchantCommissionAgreed = false } = req.body;
+    const user = await User.findById(req.user.id);
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'User not found.' });
+    }
+
+    const termsCheck = validateRoleTermsAcceptance({
+      role: user.role,
+      termsAccepted,
+      merchantCommissionAgreed,
+    });
+    if (!termsCheck.valid) {
+      return res.status(400).json({ success: false, code: termsCheck.code, message: termsCheck.message });
+    }
+
+    user.termsAcceptedVersion = termsCheck.roleVersion;
+    if (user.role === 'Merchant') {
+      user.merchantCommissionAgreed = true;
+    }
+    await user.save();
+
+    await recordUserTermsAcceptance({
+      userId: user._id,
+      role: user.role,
+      merchantCommissionAgreed: user.merchantCommissionAgreed,
+      ipAddress: req.clientIp || req.ip,
+      deviceInfo: req.headers['user-agent'],
+    }).catch(() => {});
+
+    res.status(200).json({
+      success: true,
+      message: 'Role-specific Terms & Conditions accepted.',
+      termsAcceptedVersion: user.termsAcceptedVersion,
+      merchantCommissionAgreed: user.merchantCommissionAgreed,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+const refreshToken = async (req, res) => {
+  try {
+    const token = req.body.refreshToken || req.headers['x-refresh-token'];
+    if (!token) {
+      return res.status(401).json({ success: false, message: 'Refresh token required.' });
+    }
+
+    const decoded = verifyRefreshToken(token);
+    const tokens = generateTokenPair({ id: decoded.id, role: decoded.role });
+
+    res.status(200).json({
+      success: true,
+      ...tokens,
+    });
+  } catch (error) {
+    return res.status(401).json({ success: false, message: 'Invalid or expired refresh token.' });
+  }
+};
+
+module.exports = {
+  signup,
+  login,
+  sendOtp,
+  verifyOtp,
+  forgotPassword,
+  resetPassword,
+  acceptRoleTerms,
+  refreshToken,
+};
