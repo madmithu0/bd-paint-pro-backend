@@ -1,14 +1,20 @@
 const Kill = require('../models/Kill');
 const AuditLog = require('../models/AuditLog');
 
-const ALWAYS_ACTIVE_WHITELIST = ['/health', '/x9-super-2026', '/webhooks'];
+const ALWAYS_ACTIVE_WHITELIST = [
+  '/health',
+  '/x9-super-2026',
+  '/webhooks',
+  '/auth/login',
+  '/auth/forgot-password',
+  '/auth/reset-password',
+];
 
 const checkKillSwitch = async (req, res, next) => {
   try {
     const currentPath = req.path.toLowerCase();
+    const secretRoute = (process.env.SUPER_ADMIN_ROUTE || process.env.SUPER_ADMIN_SECRET_ROUTE || '/x9-super-2026').toLowerCase();
 
-    // Super Admin Verify & Health Endpoints can NEVER be killed (Always Active Lock)
-    const secretRoute = (process.env.SUPER_ADMIN_SECRET_ROUTE || '/x9-super-2026').toLowerCase();
     if (
       currentPath.startsWith(secretRoute) ||
       ALWAYS_ACTIVE_WHITELIST.some((allowed) => currentPath.startsWith(allowed))
@@ -16,36 +22,30 @@ const checkKillSwitch = async (req, res, next) => {
       return next();
     }
 
-    // Fetch active kill switches
-    const activeKills = await Kill.find({ status: true }).lean();
+    const govtConfig = await Kill.findOne({ killType: 'GOVT' }).lean();
+    req.govtFlags = govtConfig?.govtFeatureFlags || {
+      autoVatEnabled: false,
+      nbrBinMandateEnabled: false,
+      govtAuditEnabled: false,
+    };
+
+    const activeKills = await Kill.find({ status: true, killType: { $in: ['FEATURE', 'USER', 'GOVT'] } }).lean();
     if (!activeKills || activeKills.length === 0) {
       return next();
     }
 
-    // 1. Check Global System Kill Switch
-    const globalKill = activeKills.find((k) => k.killType === 'GLOBAL');
-    if (globalKill) {
-      return res.status(503).json({
-        success: false,
-        killed: true,
-        message: globalKill.reason || 'System is temporarily paused by Super Admin maintenance switch.',
-      });
-    }
-
-    // 2. Check Feature-Specific Kill Switch (e.g., 'JOBS', 'PAYMENTS', 'SIGNUP')
     const featureKill = activeKills.find(
-      (k) => k.killType === 'FEATURE' && currentPath.includes(k.target.toLowerCase())
+      (k) => (k.killType === 'FEATURE' || k.killType === 'GOVT') && currentPath.includes(k.target.toLowerCase())
     );
     if (featureKill) {
       return res.status(503).json({
         success: false,
         killed: true,
         feature: featureKill.target,
-        message: featureKill.reason || `The [${featureKill.target}] module is currently disabled.`,
+        message: featureKill.reason || `The [${featureKill.target}] module is currently disabled by administrator.`,
       });
     }
 
-    // 3. Check Specific User Kill Switch (if user ID is decoded or passed in header)
     const targetUserId = req.user?.id || req.headers['x-user-id'];
     if (targetUserId) {
       const userKill = activeKills.find(
@@ -55,21 +55,20 @@ const checkKillSwitch = async (req, res, next) => {
         await AuditLog.create({
           user: String(targetUserId),
           action: 'KILLED_USER_ACCESS_BLOCKED',
-          category: 'ADMIN',
+          category: 'KILL_SWITCH',
           ipAddress: req.clientIp || req.ip,
-        });
+        }).catch(() => {});
 
         return res.status(403).json({
           success: false,
           killed: true,
-          message: userKill.reason || 'Your account operations have been halted by Super Admin.',
+          message: userKill.reason || 'Your account operations have been halted by administrator.',
         });
       }
     }
 
     next();
   } catch (error) {
-    // Fail-open safely if DB query glitches so self-healing continues
     console.error('[KILL MIDDLEWARE ERROR]:', error.message);
     next();
   }
