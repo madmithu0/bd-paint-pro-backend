@@ -15,14 +15,27 @@ const selectedServiceItemSchema = new mongoose.Schema(
       type: String,
       required: true,
     },
+    serviceName: {
+      type: String,
+      default: '',
+    },
     sqft: {
       type: Number,
       required: true,
       min: 1,
     },
+    coatCount: {
+      type: Number,
+      default: 2,
+      min: 1,
+    },
     isMistriOnly: {
       type: Boolean,
       default: false,
+    },
+    paintBrand: {
+      type: String,
+      default: '',
     },
     slotSqftPerDay: {
       type: Number,
@@ -45,10 +58,51 @@ const selectedServiceItemSchema = new mongoose.Schema(
       type: Number,
       default: 0,
     },
+    addedMidJob: {
+      type: Boolean,
+      default: false,
+    },
   },
   { _id: false }
 );
 
+const inputMediaSchema = new mongoose.Schema(
+  {
+    type: {
+      type: String,
+      enum: ['photo', 'video', 'voice'],
+      required: true,
+    },
+    url: {
+      type: String,
+      required: true,
+    },
+    transcribedText: {
+      type: String,
+      default: '',
+    },
+    detectedDialect: {
+      type: String,
+      default: '',
+    },
+  },
+  { _id: false }
+);
+
+const customerSelectedMistriSchema = new mongoose.Schema(
+  {
+    mistriId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+      required: true,
+    },
+    mistriName: {
+      type: String,
+      default: '',
+    },
+  },
+  { _id: false }
+);
 const jobSchema = new mongoose.Schema(
   {
     customer: {
@@ -68,6 +122,10 @@ const jobSchema = new mongoose.Schema(
         ref: 'User',
       },
     ],
+    customerSelectedMistris: {
+      type: [customerSelectedMistriSchema],
+      default: [],
+    },
     assignedTeam: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Team',
@@ -77,15 +135,32 @@ const jobSchema = new mongoose.Schema(
       type: [selectedServiceItemSchema],
       default: [],
     },
+    inputMedia: {
+      type: [inputMediaSchema],
+      default: [],
+    },
+    customJobDescription: {
+      type: String,
+      trim: true,
+      default: '',
+    },
     sqft: {
       type: Number,
       required: [true, 'Square feet (Sqft) is required'],
       min: [1, 'Sqft must be greater than 0'],
     },
+    totalSqft: {
+      type: Number,
+      default: 0,
+    },
     price: {
       type: Number,
       required: [true, 'Total job price is required'],
       min: 0,
+    },
+    totalBill: {
+      type: Number,
+      default: 0,
     },
     netProfit: {
       type: Number,
@@ -143,6 +218,11 @@ const jobSchema = new mongoose.Schema(
       type: String,
       enum: ['None', 'Requested', 'Scheduled', 'Completed'],
       default: 'None',
+    },
+    milestone1Paid: {
+      type: Boolean,
+      default: false,
+      index: true,
     },
     milestoneStages: {
       stage1Percent: { type: Number, default: 30 },
@@ -221,7 +301,10 @@ jobSchema.pre('save', function (next) {
     let allMistriOnly = true;
 
     this.selectedServices.forEach((item) => {
-      const itemSlots = Number((item.sqft / Math.max(50, item.slotSqftPerDay)).toFixed(2));
+      if (!item.serviceName && item.name) item.serviceName = item.name;
+      if (!item.name && item.serviceName) item.name = item.serviceName;
+      const coatFactor = Math.max(1, item.coatCount || 2) / 2;
+      const itemSlots = Number(((item.sqft * coatFactor) / Math.max(50, item.slotSqftPerDay)).toFixed(2));
       item.calculatedSlots = itemSlots;
       sumSqft += item.sqft;
       sumSlots += itemSlots;
@@ -243,8 +326,16 @@ jobSchema.pre('save', function (next) {
     this.totalSlots = Number((this.sqft / Math.max(50, this.perDayCapacity)).toFixed(2));
   }
 
+  this.totalSqft = this.sqft;
+  this.totalBill = this.price;
   this.totalDays = Number((this.totalSlots / Math.max(1, this.mistriCount)).toFixed(2));
   this.netProfit = Math.max(0, this.price - this.materialCost);
+
+  if (this.milestone1Paid && !this.milestoneStages.stage1Paid) {
+    this.milestoneStages.stage1Paid = true;
+  } else if (this.milestoneStages.stage1Paid && !this.milestone1Paid) {
+    this.milestone1Paid = true;
+  }
 
   this.milestoneStages.stage1Amount = Math.round(this.price * 0.30);
   this.milestoneStages.stage2Amount = Math.round(this.price * 0.40);
