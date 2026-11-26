@@ -58,7 +58,7 @@ const calculateJobPriceAndDays = ({
     repairCost,
     totalPrice,
     isMistriOnly,
-    shareVersionLock: 'v3.0.0-80-5-15',
+    shareVersionLock: 'v3.8.0-80-5-15',
   };
 };
 
@@ -76,11 +76,15 @@ const calculateDynamicServiceSelection = ({
   items.forEach((item) => {
     const sqft = Math.max(0, Number(item.sqft) || 0);
     const slotCapacity = Math.max(50, Number(item.slotSqftPerDay) || SQFT_PER_DAY_LOCK);
-    const labourRate = Math.max(0, Number(item.labourRatePerSqft) || 0);
-    const withMaterialRate = Math.max(labourRate, Number(item.withMaterialRatePerSqft) || 0);
+    const defaultCoats = Math.max(1, Number(item.defaultCoats) || 2);
+    const coatCount = Math.max(1, Number(item.coatCount) || defaultCoats);
+    const coatMultiplier = Number(item.perCoatRateMultiplier) || Number((coatCount / defaultCoats).toFixed(2));
+
+    const labourRate = Math.max(0, Number(item.labourRatePerSqft) || 0) * coatMultiplier;
+    const withMaterialRate = Math.max(labourRate, (Number(item.withMaterialRatePerSqft) || 0) * coatMultiplier);
     const isMistriOnly = Boolean(item.isMistriOnly);
 
-    const itemSlots = sqft / slotCapacity;
+    const itemSlots = (sqft * coatMultiplier) / slotCapacity;
     const itemLabour = sqft * labourRate;
     const itemMaterial = isMistriOnly ? 0 : sqft * (withMaterialRate - labourRate);
 
@@ -89,7 +93,6 @@ const calculateDynamicServiceSelection = ({
     totalLabourCost += itemLabour;
     totalMaterialCost += itemMaterial;
   });
-
   const problems = Array.isArray(wallProblem) ? wallProblem : [wallProblem];
   const repairRatePerSqft = problems.reduce(
     (sum, prob) => sum + (WALL_REPAIR_SURCHARGE[prob] || 0),
@@ -117,17 +120,19 @@ const calculateDynamicServiceSelection = ({
     materialCost: finalMaterialCost,
     totalPrice,
     advance30Percent: Math.round(totalPrice * 0.3),
-    shareVersionLock: 'v3.0.0-80-5-15',
+    shareVersionLock: 'v3.8.0-80-5-15',
   };
 };
 
 const calculateNetProfitSplit = ({
   totalPrice,
   materialCost = 0,
+  vatAmount = 0,
   hasAgent = false,
   merchantCommissionRate = 4,
+  dealerMarginRate = 0,
 }) => {
-  const netProfit = Math.max(0, Number(totalPrice) - Number(materialCost));
+  const netProfit = Math.max(0, Number(totalPrice) - Number(materialCost) - Number(vatAmount));
   const mistriShare = Number((netProfit * 0.8).toFixed(2));
   const agentShare = hasAgent ? Number((netProfit * 0.05).toFixed(2)) : 0;
   const platformShare = hasAgent
@@ -136,6 +141,9 @@ const calculateNetProfitSplit = ({
   const merchantCommission = Number(
     (Number(materialCost) * (Number(merchantCommissionRate) / 100)).toFixed(2)
   );
+  const dealerMargin = Number(
+    (Number(materialCost) * (Number(dealerMarginRate) / 100)).toFixed(2)
+  );
 
   return {
     netProfit,
@@ -143,6 +151,7 @@ const calculateNetProfitSplit = ({
     agentShare,
     platformShare,
     merchantCommission,
+    dealerMargin,
   };
 };
 
