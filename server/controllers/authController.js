@@ -1,9 +1,11 @@
 const crypto = require('crypto');
 const User = require('../models/User');
 const OTP = require('../models/OTP');
+const securityConfig = require('../config/securityConfig');
 const { generateTokenPair, verifyRefreshToken } = require('../utils/tokenUtils');
 const { verifyFirebasePhoneToken } = require('../utils/smsUtils');
 const { sendUserGmailOtp } = require('../utils/emailUtils');
+const { validateRoleTermsAcceptance, recordUserTermsAcceptance } = require('../legal/termsVersion');
 
 const ALLOWED_ROLES = ['Customer', 'Mistri', 'Agent', 'Merchant'];
 
@@ -17,32 +19,65 @@ const normalizeBdPhone = (rawPhone) => {
   return cleaned;
 };
 
-// 1. Signup New Account (Customer / Mistri / Agent / Merchant)
+const validatePasswordStrength = (password) => {
+  const pwd = String(password || '');
+  const policy = securityConfig.passwordPolicy;
+  if (pwd.length < policy.minLength || pwd.length > policy.maxLength) {
+    return `Password must be between ${policy.minLength} and ${policy.maxLength} characters.`;
+  }
+  if (policy.requireUppercase && !/[A-Z]/.test(pwd)) return 'Password must contain at least one uppercase letter.';
+  if (policy.requireLowercase && !/[a-z]/.test(pwd)) return 'Password must contain at least one lowercase letter.';
+  if (policy.requireNumber && !/\d/.test(pwd)) return 'Password must contain at least one number.';
+  if (policy.requireSpecialChar && !/[!@#$%^&*(),.?":{}|<>_\-+=[\]\\/~`]/.test(pwd)) {
+    return 'Password must contain at least one special character.';
+  }
+  return null;
+};
+
 const signup = async (req, res, next) => {
   try {
-    const { name, phone, email, password, role = 'Customer', firebaseIdToken } = req.body;
+    const {
+      name,
+      phone,
+      email,
+      password,
+      role = 'Customer',
+      district = '',
+      upazila = '',
+      referralCode = '',
+      termsAccepted = false,
+      merchantCommissionAgreed = false,
+      firebaseIdToken,
+    } = req.body;
 
     if (!name || !phone || !password) {
-      return res.status(400).json({
-        success: false,
-        message: 'Name, phone number, and password are required.',
-      });
+      return res.status(400).json({ success: false, message: 'Name, phone number, and password are required.' });
     }
 
     if (!ALLOWED_ROLES.includes(role)) {
-      return res.status(403).json({
-        success: false,
-        message: 'Invalid role selected.',
-      });
+      return res.status(403).json({ success: false, message: 'Invalid role selected.' });
+    }
+
+    const pwdError = validatePasswordStrength(password);
+    if (pwdError) {
+      return res.status(400).json({ success: false, message: pwdError });
+    }
+
+    const termsCheck = validateRoleTermsAcceptance({ role, termsAccepted, merchantCommissionAgreed });
+    if (!termsCheck.valid) {
+      return res.status(400).json({ success: false, code: termsCheck.code, message: termsCheck.message });
     }
 
     const cleanPhone = String(phone).trim();
     const existingUser = await User.findOne({ phone: cleanPhone });
     if (existingUser) {
-      return res.status(409).json({
-        success: false,
-        message: 'Phone number is already registered.',
-      });
+      return res.status(409).json({ success: false, message: 'Phone number is already registered.' });
+    }
+
+    let referredByAgent = null;
+    if (referralCode) {
+      const agentUser = await User.findOne({ referralCode: String(referralCode).trim().toUpperCase(), role: 'Agent' });
+      if (agentUser) referredByAgent = agentUser._id;
     }
 
     let phoneVerifiedViaFirebase = false;
@@ -57,11 +92,25 @@ const signup = async (req, res, next) => {
       name: String(name).trim(),
       phone: cleanPhone,
       email: email ? String(email).trim().toLowerCase() : undefined,
-      password,
+      passwordHash: password,
       role,
+      district: String(district).trim(),
+      upazila: String(upazila).trim(),
+      referredByAgent,
+      termsAcceptedVersion: termsCheck.roleVersion,
+      merchantCommissionAgreed: role === 'Merchant' ? Boolean(merchantCommissionAgreed) : false,
+      accountStatus: 'Active',
       verify: phoneVerifiedViaFirebase || role === 'Customer',
       active: true,
     });
+
+    await recordUserTermsAcceptance({
+      userId: user._id,
+      role,
+      merchantCommissionAgreed,
+      ipAddress: req.clientIp || req.ip,
+      deviceInfo: req.headers['user-agent'],
+    }).catch(() => {});
 
     const tokens = generateTokenPair({ id: user._id, role: user.role });
 
@@ -75,6 +124,7 @@ const signup = async (req, res, next) => {
         email: user.email,
         role: user.role,
         verify: user.verify,
+        termsAcceptedVersion: user.termsAcceptedVersion,
       },
       ...tokens,
     });
@@ -82,41 +132,58 @@ const signup = async (req, res, next) => {
     next(error);
   }
 };
-
-// 2. Login User with Phone or Email & Password
 const login = async (req, res, next) => {
   try {
     const { identifier, phone, email, password } = req.body;
     const loginId = identifier || phone || email;
 
     if (!loginId || !password) {
-      return res.status(400).json({
-        success: false,
-        message: 'Phone/Email and password are required.',
-      });
+      return res.status(400).json({ success: false, message: 'Phone/Email and password are required.' });
     }
 
     const query = String(loginId).includes('@')
       ? { email: String(loginId).trim().toLowerCase() }
       : { phone: String(loginId).trim() };
 
-    const user = await User.findOne(query).select('+password');
+    const user = await User.findOne(query).select('+passwordHash');
     if (!user) {
-      return res.status(401).json({
+      return res.status(401).json({ success: false, message: 'Invalid credentials.' });
+    }
+
+    if (user.isLocked && user.isLocked()) {
+      const remainingMins = Math.ceil((new Date(user.lockUntil).getTime() - Date.now()) / 60000);
+      return res.status(423).json({
         success: false,
-        message: 'Invalid credentials.',
+        locked: true,
+        message: `Account temporarily locked due to failed login attempts. Try again in ${remainingMins} minutes.`,
       });
     }
 
     const isMatch = await user.comparePassword(password);
     if (!isMatch) {
+      const attempts = (user.failedLoginAttempts || 0) + 1;
+      const maxAttempts = securityConfig.passwordPolicy.maxFailedAttempts || 5;
+      const updateData = { failedLoginAttempts: attempts };
+
+      if (attempts >= maxAttempts) {
+        updateData.lockUntil = new Date(Date.now() + (securityConfig.passwordPolicy.lockDurationMs || 30 * 60 * 1000));
+        updateData.failedLoginAttempts = 0;
+      }
+      await User.updateOne({ _id: user._id }, { $set: updateData });
+
       return res.status(401).json({
         success: false,
-        message: 'Invalid credentials.',
+        message: attempts >= maxAttempts
+          ? 'Too many failed attempts. Account locked for 30 minutes.'
+          : 'Invalid credentials.',
       });
     }
 
-    if (!user.active || user.suspended) {
+    if (user.failedLoginAttempts > 0 || user.lockUntil) {
+      await User.updateOne({ _id: user._id }, { $set: { failedLoginAttempts: 0, lockUntil: null } });
+    }
+
+    if (!user.active || user.suspended || user.accountStatus === 'Suspended' || user.accountStatus === 'Banned') {
       return res.status(403).json({
         success: false,
         message: user.blockReason || 'Account is blocked or suspended.',
@@ -135,6 +202,8 @@ const login = async (req, res, next) => {
         email: user.email,
         role: user.role,
         verify: user.verify,
+        termsAcceptedVersion: user.termsAcceptedVersion,
+        merchantCommissionAgreed: user.merchantCommissionAgreed,
       },
       ...tokens,
     });
@@ -142,19 +211,15 @@ const login = async (req, res, next) => {
     next(error);
   }
 };
-// 3. Send Free OTP (Gmail SMTP for Email OR Instructs Frontend to trigger Free Firebase Phone OTP)
+
 const sendOtp = async (req, res, next) => {
   try {
     const { email, phone, purpose = 'LOGIN' } = req.body;
 
     if (!email && !phone) {
-      return res.status(400).json({
-        success: false,
-        message: 'Email or phone number is required to send OTP.',
-      });
+      return res.status(400).json({ success: false, message: 'Email or phone number is required to send OTP.' });
     }
 
-    // Free Gmail SMTP OTP Flow
     if (email) {
       const cleanEmail = String(email).trim().toLowerCase();
       const otpCode = generateSixDigitOtp();
@@ -167,65 +232,45 @@ const sendOtp = async (req, res, next) => {
         purpose,
       });
 
-      await sendUserGmailOtp({
-        email: cleanEmail,
-        otpCode,
-        purpose,
-      });
+      await sendUserGmailOtp({ email: cleanEmail, otpCode, purpose });
 
       return res.status(200).json({
         success: true,
         provider: 'GMAIL_SMTP',
-        message: 'Free verification OTP sent to your Gmail.',
+        message: 'Verification OTP sent to your Gmail.',
       });
     }
 
-    // Free Firebase Phone Auth Flow (Zero SMS cost on server)
     const cleanPhone = String(phone).trim();
     await OTP.deleteMany({ phone: cleanPhone, purpose });
-    await OTP.create({
-      phone: cleanPhone,
-      provider: 'FIREBASE_PHONE',
-      purpose,
-    });
+    await OTP.create({ phone: cleanPhone, provider: 'FIREBASE_PHONE', purpose });
 
     return res.status(200).json({
       success: true,
       provider: 'FIREBASE_PHONE',
       useFirebase: true,
       formattedPhone: normalizeBdPhone(cleanPhone),
-      message: 'Proceed with free Firebase phone OTP verification.',
+      message: 'Proceed with Firebase phone OTP verification.',
     });
   } catch (error) {
     next(error);
   }
 };
-
-// 4. Verify Free OTP (Verifies either Gmail 6-digit code OR Firebase Phone ID Token)
 const verifyOtp = async (req, res, next) => {
   try {
     const { email, phone, code, firebaseIdToken, purpose = 'LOGIN' } = req.body;
 
-    // Case A: Free Firebase Phone Token Verification
     if (firebaseIdToken) {
       const fbVerified = await verifyFirebasePhoneToken(firebaseIdToken);
       const rawInputPhone = phone ? String(phone).trim() : fbVerified.phone;
 
       if (phone && normalizeBdPhone(fbVerified.phone) !== normalizeBdPhone(rawInputPhone)) {
-        return res.status(400).json({
-          success: false,
-          message: 'Verified Firebase phone number does not match.',
-        });
+        return res.status(400).json({ success: false, message: 'Verified Firebase phone number does not match.' });
       }
 
       await OTP.findOneAndUpdate(
         { phone: rawInputPhone, purpose },
-        {
-          phone: rawInputPhone,
-          provider: 'FIREBASE_PHONE',
-          firebaseUid: fbVerified.firebaseUid,
-          verified: true,
-        },
+        { phone: rawInputPhone, provider: 'FIREBASE_PHONE', firebaseUid: fbVerified.firebaseUid, verified: true },
         { upsert: true, new: true }
       );
 
@@ -241,58 +286,36 @@ const verifyOtp = async (req, res, next) => {
         success: true,
         verified: true,
         provider: 'FIREBASE_PHONE',
-        message: 'Phone number verified for free via Firebase.',
+        message: 'Phone number verified via Firebase.',
         user: user
-          ? {
-              id: user._id,
-              name: user.name,
-              phone: user.phone,
-              email: user.email,
-              role: user.role,
-              verify: user.verify,
-            }
+          ? { id: user._id, name: user.name, phone: user.phone, email: user.email, role: user.role, verify: user.verify }
           : null,
         ...tokens,
       });
     }
 
-    // Case B: Free Gmail OTP Code Verification
     if (email && code) {
       const cleanEmail = String(email).trim().toLowerCase();
       const otpRecord = await OTP.findOne({ email: cleanEmail, purpose, verified: false }).sort({ createdAt: -1 });
 
       if (!otpRecord) {
-        return res.status(400).json({
-          success: false,
-          message: 'OTP expired or not found. Please request a new one.',
-        });
+        return res.status(400).json({ success: false, message: 'OTP expired or not found. Please request a new one.' });
       }
 
       if (otpRecord.attempts >= 5) {
-        return res.status(429).json({
-          success: false,
-          message: 'Too many wrong attempts. Request a new OTP.',
-        });
+        return res.status(429).json({ success: false, message: 'Too many wrong attempts. Request a new OTP.' });
       }
 
       if (otpRecord.code !== String(code).trim()) {
         otpRecord.attempts += 1;
         await otpRecord.save();
-        return res.status(400).json({
-          success: false,
-          message: 'Invalid OTP code.',
-        });
+        return res.status(400).json({ success: false, message: 'Invalid OTP code.' });
       }
 
       otpRecord.verified = true;
       await otpRecord.save();
 
-      const user = await User.findOneAndUpdate(
-        { email: cleanEmail },
-        { verify: true },
-        { new: true }
-      );
-
+      const user = await User.findOneAndUpdate({ email: cleanEmail }, { verify: true }, { new: true });
       const tokens = user ? generateTokenPair({ id: user._id, role: user.role }) : {};
 
       return res.status(200).json({
@@ -301,69 +324,46 @@ const verifyOtp = async (req, res, next) => {
         provider: 'GMAIL_SMTP',
         message: 'Gmail verified successfully.',
         user: user
-          ? {
-              id: user._id,
-              name: user.name,
-              phone: user.phone,
-              email: user.email,
-              role: user.role,
-              verify: user.verify,
-            }
+          ? { id: user._id, name: user.name, phone: user.phone, email: user.email, role: user.role, verify: user.verify }
           : null,
         ...tokens,
       });
     }
 
-    return res.status(400).json({
-      success: false,
-      message: 'Provide either (email + code) or firebaseIdToken.',
-    });
+    return res.status(400).json({ success: false, message: 'Provide either (email + code) or firebaseIdToken.' });
   } catch (error) {
     next(error);
   }
 };
-// 5. Forgot Password (Sends Free Gmail OTP or triggers Firebase Phone Reset)
+
 const forgotPassword = async (req, res, next) => {
   try {
     const { identifier, email, phone } = req.body;
     const target = identifier || email || phone;
 
     if (!target) {
-      return res.status(400).json({
-        success: false,
-        message: 'Email or phone number is required.',
-      });
+      return res.status(400).json({ success: false, message: 'Email or phone number is required.' });
     }
 
     const isEmail = String(target).includes('@');
     const user = await User.findOne(
-      isEmail
-        ? { email: String(target).trim().toLowerCase() }
-        : { phone: String(target).trim() }
+      isEmail ? { email: String(target).trim().toLowerCase() } : { phone: String(target).trim() }
     );
 
     if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: 'No account found with this email or phone.',
-      });
+      return res.status(404).json({ success: false, message: 'No account found with this email or phone.' });
     }
-
     if (isEmail) {
       const otpCode = generateSixDigitOtp();
-      await OTP.deleteMany({ email: user.email, purpose: 'FORGOT_PASSWORD' });
+      await OTP.deleteMany({ email: user.email, purpose: { $in: ['FORGOT_PASSWORD', 'PASSWORD_RESET'] } });
       await OTP.create({
         email: user.email,
         code: otpCode,
         provider: 'GMAIL_SMTP',
-        purpose: 'FORGOT_PASSWORD',
+        purpose: 'PASSWORD_RESET',
       });
 
-      await sendUserGmailOtp({
-        email: user.email,
-        otpCode,
-        purpose: 'Password Reset',
-      });
+      await sendUserGmailOtp({ email: user.email, otpCode, purpose: 'Password Reset' });
 
       return res.status(200).json({
         success: true,
@@ -384,16 +384,13 @@ const forgotPassword = async (req, res, next) => {
   }
 };
 
-// 6. Reset Password using Verified Gmail OTP or Firebase Phone Token
 const resetPassword = async (req, res, next) => {
   try {
     const { email, phone, code, firebaseIdToken, newPassword } = req.body;
 
-    if (!newPassword || String(newPassword).length < 6) {
-      return res.status(400).json({
-        success: false,
-        message: 'New password must be at least 6 characters long.',
-      });
+    const pwdError = validatePasswordStrength(newPassword);
+    if (pwdError) {
+      return res.status(400).json({ success: false, message: pwdError });
     }
 
     let user = null;
@@ -403,41 +400,42 @@ const resetPassword = async (req, res, next) => {
       const localPhone = fbVerified.phone.replace(/^\+88/, '');
       user = await User.findOne({
         phone: { $in: [fbVerified.phone, localPhone, phone].filter(Boolean) },
-      }).select('+password');
+      }).select('+passwordHash +passwordHistory');
     } else if (email && code) {
       const cleanEmail = String(email).trim().toLowerCase();
       const otpRecord = await OTP.findOne({
         email: cleanEmail,
-        purpose: 'FORGOT_PASSWORD',
+        purpose: { $in: ['FORGOT_PASSWORD', 'PASSWORD_RESET'] },
         code: String(code).trim(),
         verified: false,
       }).sort({ createdAt: -1 });
 
       if (!otpRecord) {
-        return res.status(400).json({
-          success: false,
-          message: 'Invalid or expired reset OTP.',
-        });
+        return res.status(400).json({ success: false, message: 'Invalid or expired reset OTP.' });
       }
 
       otpRecord.verified = true;
       await otpRecord.save();
-      user = await User.findOne({ email: cleanEmail }).select('+password');
+      user = await User.findOne({ email: cleanEmail }).select('+passwordHash +passwordHistory');
     } else {
-      return res.status(400).json({
-        success: false,
-        message: 'Provide (email + code) or firebaseIdToken.',
-      });
+      return res.status(400).json({ success: false, message: 'Provide (email + code) or firebaseIdToken.' });
     }
 
     if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: 'User account not found.',
-      });
+      return res.status(404).json({ success: false, message: 'User account not found.' });
     }
 
-    user.password = newPassword;
+    const isSameOld = await user.comparePassword(newPassword);
+    if (isSameOld) {
+      return res.status(400).json({ success: false, message: 'New password must be different from your previous password.' });
+    }
+
+    if (user.passwordHash) {
+      user.passwordHistory = [user.passwordHash, ...(user.passwordHistory || [])].slice(0, 3);
+    }
+    user.passwordHash = newPassword;
+    user.failedLoginAttempts = 0;
+    user.lockUntil = null;
     await user.save();
 
     res.status(200).json({
@@ -447,34 +445,4 @@ const resetPassword = async (req, res, next) => {
   } catch (error) {
     next(error);
   }
-};
-
-// 7. Refresh Access Token
-const refreshToken = async (req, res) => {
-  try {
-    const token = req.body.refreshToken || req.headers['x-refresh-token'];
-    if (!token) {
-      return res.status(401).json({ success: false, message: 'Refresh token required.' });
-    }
-
-    const decoded = verifyRefreshToken(token);
-    const tokens = generateTokenPair({ id: decoded.id, role: decoded.role });
-
-    res.status(200).json({
-      success: true,
-      ...tokens,
-    });
-  } catch (error) {
-    return res.status(401).json({ success: false, message: 'Invalid or expired refresh token.' });
-  }
-};
-
-module.exports = {
-  signup,
-  login,
-  sendOtp,
-  verifyOtp,
-  forgotPassword,
-  resetPassword,
-  refreshToken,
 };
