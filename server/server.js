@@ -42,8 +42,8 @@ const { globalErrorHandler, notFoundHandler } = safeRequire('./middleware/errorM
   globalErrorHandler: (err, req, res, next) => res.status(500).json({ success: false, message: 'Internal Server Error' }),
 });
 
-const APP_VERSION = 'v3.0.0';
-const ARCHITECTURE_LOCK = 'SELF-HEALING LOCK';
+const APP_VERSION = 'v3.8.0';
+const ARCHITECTURE_LOCK = 'PASSWORD + 2FA LOCK';
 const API_PREFIX = '/api/v1';
 
 const rawSuperRoute = (
@@ -91,14 +91,14 @@ app.locals.systemConfig = {
   dynamicServiceSlots: true,
   advanceGatePercent: 0.30,
   aiConfidenceThreshold: 0.80,
-  biometricThreshold: 0.90,
+  biometricsRemoved: true,
   shareSplit: {
     mistri: 0.80,
     agentWithAgent: 0.05,
     platformWithAgent: 0.15,
     platformNoAgent: 0.20,
   },
-  superAdmin4LayerActive: true,
+  superAdminPassword2FAActive: true,
   hideAfterMinutes: 0,
   autoHideEnabled: false,
 };
@@ -190,12 +190,14 @@ const routeRegistry = [
   { path: '/schedules', file: './routes/scheduleRoutes', protected: true },
   { path: '/search', file: './routes/searchRoutes', protected: true },
   { path: '/materials', file: './routes/materialRoutes', protected: true },
+  { path: '/merchant-store', file: './routes/merchantStoreRoutes', protected: true },
   { path: '/sms', file: './routes/smsRoutes', protected: true },
   { path: '/wallet', file: './routes/walletRoutes', protected: true },
   { path: '/kill', file: './routes/killRoutes', protected: true },
   { path: '/backup', file: './routes/backupRoutes', protected: true },
   { path: '/govt', file: './routes/govtRoutes', protected: true },
 ];
+
 routeRegistry.forEach((route) => {
   const routerInstance = safeRequire(route.file);
   if (routerInstance) {
