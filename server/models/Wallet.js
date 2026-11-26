@@ -4,7 +4,14 @@ const transactionSubSchema = new mongoose.Schema(
   {
     type: {
       type: String,
-      enum: ['EQUAL_SPLIT_CREDIT', 'AGENT_COMMISSION', 'WITHDRAW', 'REFUND_CREDIT', 'ADD_MONEY'],
+      enum: [
+        'EQUAL_SPLIT_CREDIT',
+        'AGENT_COMMISSION',
+        'MERCHANT_SETTLEMENT',
+        'WITHDRAW',
+        'REFUND_CREDIT',
+        'ADD_MONEY',
+      ],
       required: true,
     },
     amount: {
@@ -37,6 +44,41 @@ const transactionSubSchema = new mongoose.Schema(
   { _id: true }
 );
 
+const merchantSettlementSchema = new mongoose.Schema(
+  {
+    orderId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'MaterialOrder',
+      default: null,
+    },
+    jobId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Job',
+      default: null,
+    },
+    grossAmount: {
+      type: Number,
+      required: true,
+      min: 0,
+    },
+    commissionDeducted: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+    netPayable: {
+      type: Number,
+      required: true,
+      min: 0,
+    },
+    settledAt: {
+      type: Date,
+      default: Date.now,
+    },
+  },
+  { _id: true }
+);
+
 const walletSchema = new mongoose.Schema(
   {
     user: {
@@ -46,6 +88,20 @@ const walletSchema = new mongoose.Schema(
       unique: true,
       index: true,
     },
+    verifiedWalletNumber: {
+      type: String,
+      trim: true,
+      default: null,
+    },
+    walletProvider: {
+      type: String,
+      enum: ['bKash', 'Nagad', 'Rocket', 'Bank', null],
+      default: null,
+    },
+    isWalletVerified: {
+      type: Boolean,
+      default: false,
+    },
     balance: {
       type: Number,
       default: 0,
@@ -53,6 +109,10 @@ const walletSchema = new mongoose.Schema(
     },
     transactions: {
       type: [transactionSubSchema],
+      default: [],
+    },
+    merchantSettlementLedger: {
+      type: [merchantSettlementSchema],
       default: [],
     },
   },
