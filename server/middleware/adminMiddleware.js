@@ -1,20 +1,29 @@
 const jwt = require('jsonwebtoken');
 const AuditLog = require('../models/AuditLog');
 
-// Auto-hide check permanently bypassed
 const checkHideState = (req, res, next) => {
   return next();
+};
+
+const requireAdmin = (req, res, next) => {
+  if (!req.user || !['Admin', 'SuperAdmin'].includes(req.user.role)) {
+    return res.status(403).json({
+      success: false,
+      message: 'Access denied. Admin or SuperAdmin privileges required.',
+    });
+  }
+  next();
 };
 
 const superAdminGate = async (req, res, next) => {
   try {
     const openVerifyPaths = [
+      '/login',
       '/send-otps',
+      '/verify-2fa',
       '/verify-4-layer',
       '/hardware-recovery',
       '/hide-status',
-      '/voice-status',
-      '/enroll-voice',
     ];
     if (openVerifyPaths.some((p) => req.path.endsWith(p))) {
       return next();
@@ -24,53 +33,70 @@ const superAdminGate = async (req, res, next) => {
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
       return res.status(401).json({
         success: false,
-        message: 'Super Admin 4-Layer Session Token required.',
+        message: 'Super Admin Password + 2FA Session Token required.',
       });
     }
 
-    const token = authHeader.split(' ')[1];
+    const token = authHeader.split(' ');
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
     const configuredAdminId = (process.env.SUPER_ADMIN_ID || '').trim();
-    const is4LayerGreen =
+    const hasPasswordAuth = decoded.passwordVerified === true || decoded.superAdminVerified === true;
+    const has2FA =
+      decoded.twoFactorVerified === true ||
+      decoded.layers?.phoneOtp === true ||
+      decoded.layers?.gmailOtp === true;
+
+    const isVerifiedSuperAdmin =
       decoded.role === 'SuperAdmin' &&
       Boolean(configuredAdminId) &&
-      decoded.superAdminId === configuredAdminId &&
-      decoded.layers?.phoneOtp === true &&
-      decoded.layers?.gmailOtp === true &&
-      decoded.layers?.voiceVerified === true &&
-      decoded.layers?.face3DVerified === true;
+      (decoded.superAdminId === configuredAdminId || decoded.id === configuredAdminId) &&
+      hasPasswordAuth &&
+      has2FA;
 
-    if (!is4LayerGreen) {
+    if (!isVerifiedSuperAdmin) {
       await AuditLog.create({
         user: 'UNKNOWN_INTRUDER',
         role: 'Unauthorized',
-        action: 'INCOMPLETE_4_LAYER_BYPASS_ATTEMPT',
-        category: 'BIOMETRIC_FAIL',
+        action: 'INCOMPLETE_SUPER_ADMIN_2FA_ATTEMPT',
+        category: 'ADMIN',
         ipAddress: req.clientIp || req.ip,
         details: { path: req.originalUrl },
       }).catch(() => {});
 
       return res.status(403).json({
         success: false,
-        message: '4-Layer Biometric & OTP Verification incomplete. All 4 layers must be green.',
+        message: 'Super Admin Password + Phone/Gmail 2FA verification incomplete.',
       });
     }
 
     req.user = {
-      id: decoded.superAdminId,
+      id: decoded.superAdminId || decoded.id,
       role: 'SuperAdmin',
       superAdminVerified: true,
-      layers: decoded.layers,
+      twoFactorVerified: true,
     };
 
     next();
   } catch (error) {
     return res.status(401).json({
       success: false,
-      message: 'Super Admin session invalid or expired. Re-verify all 4 layers.',
+      message: 'Super Admin session invalid or expired. Please re-authenticate.',
     });
   }
 };
 
-module.exports = { checkHideState, superAdminGate };
+const verifyTransactionPin = (req, res, next) => {
+  const providedPin = String(req.headers['x-transaction-pin'] || req.body?.transactionPin || '').trim();
+  const configuredPin = String(process.env.SUPER_ADMIN_TRANSACTION_PIN || process.env.TRANSACTION_PIN || '').trim();
+
+  if (!configuredPin || !providedPin || providedPin !== configuredPin) {
+    return res.status(403).json({
+      success: false,
+      message: 'Invalid or missing Super Admin Transaction PIN.',
+    });
+  }
+  next();
+};
+
+module.exports = { checkHideState, requireAdmin, superAdminGate, verifyTransactionPin };
