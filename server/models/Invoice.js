@@ -1,5 +1,17 @@
 const mongoose = require('mongoose');
 
+const invoiceLineItemSchema = new mongoose.Schema(
+  {
+    serviceName: { type: String, required: true },
+    sqft: { type: Number, required: true, min: 0 },
+    coatCount: { type: Number, default: 2 },
+    rate: { type: Number, required: true, min: 0 },
+    subTotal: { type: Number, required: true, min: 0 },
+    addedMidJob: { type: Boolean, default: false },
+  },
+  { _id: false }
+);
+
 const invoiceSchema = new mongoose.Schema(
   {
     job: {
@@ -18,10 +30,35 @@ const invoiceSchema = new mongoose.Schema(
       required: true,
       unique: true,
     },
+    itemizedServices: {
+      type: [invoiceLineItemSchema],
+      default: [],
+    },
     amount: {
       type: Number,
       required: true,
       min: 0,
+    },
+    totalBill: {
+      type: Number,
+      default: 0,
+    },
+    materialCost: {
+      type: Number,
+      default: 0,
+    },
+    optionalVatAmount: {
+      type: Number,
+      default: 0,
+    },
+    netProfit: {
+      type: Number,
+      default: 0,
+    },
+    warrantyRef: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Warranty',
+      default: null,
     },
     pdfUrl: {
       type: String,
@@ -38,5 +75,14 @@ const invoiceSchema = new mongoose.Schema(
     timestamps: true,
   }
 );
+
+invoiceSchema.pre('save', function (next) {
+  if (!this.totalBill && this.amount) this.totalBill = this.amount;
+  if (!this.amount && this.totalBill) this.amount = this.totalBill;
+  if (!this.netProfit && this.totalBill > 0) {
+    this.netProfit = Math.max(0, this.totalBill - this.materialCost - this.optionalVatAmount);
+  }
+  next();
+});
 
 module.exports = mongoose.model('Invoice', invoiceSchema);
