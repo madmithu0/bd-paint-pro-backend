@@ -13,10 +13,38 @@ const disputeSchema = new mongoose.Schema(
       ref: 'User',
       required: true,
     },
+    againstUser: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+      default: null,
+    },
     reason: {
       type: String,
       required: [true, 'Dispute reason is required'],
       trim: true,
+    },
+    violationType: {
+      type: String,
+      enum: ['Standard', 'OffPlatformPoaching', 'Theft', 'Misconduct'],
+      default: 'Standard',
+      index: true,
+    },
+    severity: {
+      type: String,
+      enum: ['Low', 'Medium', 'High', 'Critical'],
+      default: 'Low',
+    },
+    legalNoticeIssued: {
+      type: Boolean,
+      default: false,
+    },
+    legalNoticeRef: {
+      type: String,
+      default: null,
+    },
+    legalNoticeIssuedAt: {
+      type: Date,
+      default: null,
     },
     description: {
       type: String,
@@ -29,7 +57,7 @@ const disputeSchema = new mongoose.Schema(
     },
     status: {
       type: String,
-      enum: ['Open', 'UnderReview', 'Solved', 'Closed'],
+      enum: ['Open', 'UnderReview', 'EscalatedLegal', 'Solved', 'Closed'],
       default: 'Open',
     },
     solutionNote: {
