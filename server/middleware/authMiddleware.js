@@ -1,7 +1,6 @@
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 
-// Verify JWT Token & Attach Active User to Request
 const verifyToken = async (req, res, next) => {
   try {
     const authHeader = req.headers.authorization;
@@ -15,7 +14,6 @@ const verifyToken = async (req, res, next) => {
     const token = authHeader.split(' ')[1];
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
-    // Check if token belongs to verified Super Admin session
     if (decoded.role === 'SuperAdmin' && decoded.superAdminVerified === true) {
       req.user = {
         id: decoded.id || process.env.SUPER_ADMIN_ID,
@@ -25,8 +23,7 @@ const verifyToken = async (req, res, next) => {
       return next();
     }
 
-    // Standard User Verification (Customer, Mistri, Agent, Merchant)
-    const user = await User.findById(decoded.id).select('-password').lean();
+    const user = await User.findById(decoded.id).select('-passwordHash').lean();
     if (!user) {
       return res.status(401).json({
         success: false,
@@ -34,10 +31,30 @@ const verifyToken = async (req, res, next) => {
       });
     }
 
-    if (!user.active || user.suspended) {
+    if (user.passwordChangedAt && decoded.iat) {
+      const changedTimestamp = Math.floor(new Date(user.passwordChangedAt).getTime() / 1000);
+      if (decoded.iat < changedTimestamp) {
+        return res.status(401).json({
+          success: false,
+          message: 'Password was recently changed. Please login again.',
+          code: 'PASSWORD_CHANGED',
+        });
+      }
+    }
+
+    if (!user.active || user.suspended || user.accountStatus === 'Suspended' || user.accountStatus === 'Banned' || user.penaltyStatus === 'Suspended') {
       return res.status(403).json({
         success: false,
         message: user.blockReason || 'Your account has been suspended or blocked by administrator.',
+      });
+    }
+
+    const isConsentRoute = req.originalUrl.includes('/accept-terms') || req.originalUrl.includes('/logout');
+    if (user.role === 'Merchant' && !user.merchantCommissionAgreed && !isConsentRoute) {
+      return res.status(403).json({
+        success: false,
+        message: 'Merchant commission agreement acceptance is required prior to account activation.',
+        code: 'COMMISSION_AGREEMENT_REQUIRED',
       });
     }
 
@@ -45,8 +62,11 @@ const verifyToken = async (req, res, next) => {
       id: user._id,
       name: user.name,
       phone: user.phone,
+      email: user.email,
       role: user.role,
       verify: user.verify,
+      termsAcceptedVersion: user.termsAcceptedVersion,
+      merchantCommissionAgreed: user.merchantCommissionAgreed,
     };
 
     next();
@@ -65,7 +85,6 @@ const verifyToken = async (req, res, next) => {
   }
 };
 
-// Role-Based Access Guard
 const requireRole = (allowedRoles = []) => {
   return (req, res, next) => {
     if (!req.user || !allowedRoles.includes(req.user.role)) {
