@@ -1,15 +1,14 @@
 const AuditLog = require('../models/AuditLog');
 
-// Sensitive paths & methods that require strict audit logging
 const MUTATION_METHODS = ['POST', 'PUT', 'PATCH', 'DELETE'];
 
 const auditLogger = (req, res, next) => {
-  // Skip routine health checks to avoid log flooding
   if (req.path.includes('/health')) {
     return next();
   }
 
   const startTime = Date.now();
+  const superRoute = process.env.SUPER_ADMIN_ROUTE || process.env.SUPER_ADMIN_SECRET_ROUTE || '/x9-super-2026';
 
   res.on('finish', async () => {
     try {
@@ -18,19 +17,24 @@ const auditLogger = (req, res, next) => {
         req.originalUrl.includes('/auth') ||
         req.originalUrl.includes('/kill') ||
         req.originalUrl.includes('/backup') ||
-        req.originalUrl.includes(process.env.SUPER_ADMIN_SECRET_ROUTE || '/x9-super-2026');
+        req.originalUrl.includes('/wallet') ||
+        req.originalUrl.includes(superRoute);
 
       if (!isMutation && !isSecurityRelevant) {
         return;
       }
 
-      // Determine Audit Category
       let category = 'GENERAL';
-      if (req.originalUrl.includes('/auth')) category = 'AUTH';
-      else if (req.originalUrl.includes('reset-password')) category = 'PASSWORD_RESET';
+      if (req.originalUrl.includes('reset-password') || req.originalUrl.includes('forgot-password')) category = 'PASSWORD_RESET';
+      else if (req.originalUrl.includes('/auth')) category = 'AUTH';
+      else if (req.originalUrl.includes('/kill')) category = 'KILL_SWITCH';
+      else if (req.originalUrl.includes('/services')) category = 'RATE_UPDATE';
+      else if (req.originalUrl.includes('terms')) category = 'ROLE_TERMS_EDIT';
+      else if (req.originalUrl.includes('/wallet/verify')) category = 'WALLET_VERIFY';
+      else if (req.originalUrl.includes('payout') || req.originalUrl.includes('withdraw')) category = 'PAYOUT';
       else if (req.originalUrl.includes('/payments')) category = 'PAYMENT';
       else if (req.originalUrl.includes('hide')) category = 'HIDE_TOGGLE';
-      else if (req.originalUrl.includes(process.env.SUPER_ADMIN_SECRET_ROUTE || '/x9-super-2026')) category = 'ADMIN';
+      else if (req.originalUrl.includes(superRoute)) category = 'ADMIN';
 
       await AuditLog.create({
         user: req.user?.id ? String(req.user.id) : req.body?.phone || req.body?.email || 'GUEST',
@@ -47,7 +51,6 @@ const auditLogger = (req, res, next) => {
         time: new Date(),
       });
     } catch (err) {
-      // Never crash main request if background audit logging fails
       console.error('[AUDIT LOGGER ERROR]:', err.message);
     }
   });
