@@ -1,7 +1,7 @@
 {
   "name": "enterprise-paint-server",
-  "version": "3.0.0",
-  "description": "MERN Full-Stack Enterprise Blueprint - v3.0.0 SELF-HEALING LOCK",
+  "version": "3.8.0",
+  "description": "MERN Full-Stack Enterprise Blueprint - v3.8.0 FINAL",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -18,6 +18,7 @@
     "@sentry/node": "8.36.0",
     "argon2": "0.41.1",
     "axios": "1.7.7",
+    "bcryptjs": "2.4.3",
     "bullmq": "5.25.2",
     "clamscan": "2.2.1",
     "cloudinary": "2.5.1",
