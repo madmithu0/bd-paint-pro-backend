@@ -6,6 +6,8 @@ const OTP = require('../../models/OTP');
 const AuditLog = require('../../models/AuditLog');
 const HackLog = require('../../models/HackLog');
 const Kill = require('../../models/Kill');
+const User = require('../../models/User');
+const Dispute = require('../../models/Dispute');
 const adminController = require('../../controllers/adminController');
 const adminMiddleware = require('../../middleware/adminMiddleware');
 const {
@@ -26,6 +28,8 @@ const safeRequireModel = (modelPath) => {
 };
 
 const SuperAdminSecurity = safeRequireModel('../../models/SuperAdminSecurity');
+const ServiceCategory = safeRequireModel('../../models/ServiceCategory');
+const RoleTerms = safeRequireModel('../../models/RoleTerms');
 
 const verifySuperAdminToken =
   adminMiddleware.superAdminGate ||
@@ -86,7 +90,6 @@ const enforceSuperAdminIpGuard = async (req, res, next) => {
     next(error);
   }
 };
-
 router.use(enforceSuperAdminIpGuard);
 
 router.post('/send-otps', async (req, res, next) => {
@@ -139,6 +142,7 @@ router.post('/login-verify', async (req, res, next) => {
       phoneOtp,
       firebaseIdToken,
       gmailOtp,
+      transactionPin,
     } = req.body;
 
     const clientIp = req.cleanIp;
@@ -157,6 +161,12 @@ router.post('/login-verify', async (req, res, next) => {
       passwordPassed = String(password || '') === String(process.env.SUPER_ADMIN_PASSWORD).trim();
     }
 
+    let pinPassed = true;
+    const configuredPin = securityDoc?.transactionPin || process.env.SUPER_ADMIN_TXN_PIN;
+    if (configuredPin) {
+      pinPassed = String(transactionPin || '').trim() === String(configuredPin).trim();
+    }
+
     let validPhoneOtp = null;
     let firebasePhonePassed = false;
 
@@ -170,7 +180,6 @@ router.post('/login-verify', async (req, res, next) => {
         firebasePhonePassed = false;
       }
     }
-
     if (!firebasePhonePassed && phoneOtp) {
       validPhoneOtp = await OTP.findOne({
         phone,
@@ -193,8 +202,10 @@ router.post('/login-verify', async (req, res, next) => {
       passwordVerified: Boolean(passwordPassed),
       phoneOtp: Boolean(firebasePhonePassed || validPhoneOtp),
       gmailOtp: Boolean(validGmailOtp),
+      transactionPinVerified: Boolean(pinPassed),
     };
-    if (!layerStatus.passwordVerified || !layerStatus.phoneOtp || !layerStatus.gmailOtp) {
+
+    if (!layerStatus.passwordVerified || !layerStatus.phoneOtp || !layerStatus.gmailOtp || !layerStatus.transactionPinVerified) {
       await AuditLog.create({
         user: superAdminId,
         role: 'SuperAdmin',
@@ -206,7 +217,7 @@ router.post('/login-verify', async (req, res, next) => {
 
       return res.status(401).json({
         success: false,
-        message: 'Login failed. Password, Phone OTP, and Gmail OTP must all pass.',
+        message: 'Login failed. Password, Phone OTP, Gmail OTP, and Transaction PIN must all pass.',
         layers: layerStatus,
       });
     }
@@ -254,11 +265,11 @@ router.post('/hardware-recovery', async (req, res, next) => {
     if (!expectedKey || !expectedId || hardwareKey !== expectedKey || superAdminId !== expectedId) {
       return res.status(401).json({ success: false, message: 'Invalid Hardware Recovery Key or ID.' });
     }
-
     const recoveryLayers = {
       passwordVerified: true,
       phoneOtp: true,
       gmailOtp: true,
+      transactionPinVerified: true,
       hardwareRecovery: true,
     };
 
@@ -298,9 +309,10 @@ router.get('/hide-status', (req, res) => {
 });
 
 router.use(verifySuperAdminToken);
+
 router.post('/change-password', async (req, res, next) => {
   try {
-    const { currentPassword, newPassword } = req.body;
+    const { currentPassword, newPassword, newTransactionPin } = req.body;
     const superAdminId = String(process.env.SUPER_ADMIN_ID || 'SA_2026_MASTER').trim();
 
     const strength = validatePasswordStrength(newPassword);
@@ -329,10 +341,12 @@ router.post('/change-password', async (req, res, next) => {
         securityDoc = new SuperAdminSecurity({
           superAdminId,
           passwordHash: newHash,
+          ...(newTransactionPin && { transactionPin: String(newTransactionPin).trim() }),
           passwordChangedAt: new Date(),
         });
       } else {
         securityDoc.passwordHash = newHash;
+        if (newTransactionPin) securityDoc.transactionPin = String(newTransactionPin).trim();
         securityDoc.passwordChangedAt = new Date();
       }
       await securityDoc.save();
@@ -346,12 +360,281 @@ router.post('/change-password', async (req, res, next) => {
       ipAddress: req.cleanIp,
     }).catch(() => {});
 
-    return res.status(200).json({ success: true, message: 'Super Admin password updated successfully.' });
+    return res.status(200).json({ success: true, message: 'Super Admin password & PIN updated successfully.' });
+  } catch (error) {
+    next(error);
+  }
+});
+router.get('/services', async (req, res, next) => {
+  try {
+    if (!ServiceCategory) {
+      return res.status(200).json({ success: true, services: [], message: 'ServiceCategory model not loaded yet.' });
+    }
+    const services = await ServiceCategory.find().sort({ createdAt: 1 }).lean();
+    return res.status(200).json({ success: true, services });
   } catch (error) {
     next(error);
   }
 });
 
+router.put('/services/:id', async (req, res, next) => {
+  try {
+    if (!ServiceCategory) {
+      return res.status(500).json({ success: false, message: 'ServiceCategory model missing.' });
+    }
+
+    const allowedFields = [
+      'nameBn',
+      'nameEn',
+      'slotSqftPerDay',
+      'defaultCoats',
+      'perCoatRateMultiplier',
+      'labourRatePerSqft',
+      'withMaterialRatePerSqft',
+      'availableBrands',
+      'specialtyArea',
+      'isLabourOnlyEnabled',
+      'isWithMaterialEnabled',
+    ];
+
+    const updates = {};
+    allowedFields.forEach((field) => {
+      if (req.body[field] !== undefined) updates[field] = req.body[field];
+    });
+
+    const updatedService = await ServiceCategory.findByIdAndUpdate(
+      req.params.id,
+      { $set: updates },
+      { new: true, runValidators: true }
+    );
+
+    if (!updatedService) {
+      return res.status(404).json({ success: false, message: 'Service category not found.' });
+    }
+
+    if (req.app.get('io')) {
+      req.app.get('io').emit('service:rateUpdated', updatedService);
+    }
+
+    await AuditLog.create({
+      user: String(process.env.SUPER_ADMIN_ID || 'SA_2026_MASTER').trim(),
+      role: 'SuperAdmin',
+      action: `SERVICE_RATE_UPDATED_${updatedService.nameEn || req.params.id}`,
+      category: 'ADMIN',
+      ipAddress: req.cleanIp,
+      details: updates,
+    }).catch(() => {});
+
+    return res.status(200).json({
+      success: true,
+      message: 'Service rate & slot configuration updated live.',
+      service: updatedService,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.patch('/services/:id/toggle', async (req, res, next) => {
+  try {
+    if (!ServiceCategory) {
+      return res.status(500).json({ success: false, message: 'ServiceCategory model missing.' });
+    }
+
+    const service = await ServiceCategory.findById(req.params.id);
+    if (!service) {
+      return res.status(404).json({ success: false, message: 'Service category not found.' });
+    }
+
+    service.isActive = req.body.isActive !== undefined ? Boolean(req.body.isActive) : !service.isActive;
+    await service.save();
+    if (req.app.get('io')) {
+      req.app.get('io').emit('service:toggled', { id: service._id, isActive: service.isActive });
+    }
+
+    await AuditLog.create({
+      user: String(process.env.SUPER_ADMIN_ID || 'SA_2026_MASTER').trim(),
+      role: 'SuperAdmin',
+      action: `SERVICE_TOGGLED_${service.isActive ? 'ON' : 'OFF'}`,
+      category: 'ADMIN',
+      ipAddress: req.cleanIp,
+      details: { serviceId: service._id, nameEn: service.nameEn },
+    }).catch(() => {});
+
+    return res.status(200).json({
+      success: true,
+      message: `Service ${service.isActive ? 'enabled' : 'disabled'} successfully.`,
+      service,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get('/role-terms', async (req, res, next) => {
+  try {
+    if (!RoleTerms) {
+      return res.status(200).json({ success: true, terms: [] });
+    }
+    const terms = await RoleTerms.find().lean();
+    return res.status(200).json({ success: true, terms });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.put('/role-terms/:role', async (req, res, next) => {
+  try {
+    if (!RoleTerms) {
+      return res.status(500).json({ success: false, message: 'RoleTerms model missing.' });
+    }
+
+    const roleName = req.params.role;
+    const { title, clauses, version, commissionRatePercent, antiPoachingPenaltyAmount } = req.body;
+
+    const updatedTerms = await RoleTerms.findOneAndUpdate(
+      { role: roleName },
+      {
+        $set: {
+          role: roleName,
+          ...(title && { title }),
+          ...(clauses && { clauses }),
+          ...(version && { version }),
+          ...(commissionRatePercent !== undefined && { commissionRatePercent }),
+          ...(antiPoachingPenaltyAmount !== undefined && { antiPoachingPenaltyAmount }),
+          updatedBy: String(process.env.SUPER_ADMIN_ID || 'SA_2026_MASTER').trim(),
+        },
+      },
+      { upsert: true, new: true, runValidators: true }
+    );
+
+    await AuditLog.create({
+      user: String(process.env.SUPER_ADMIN_ID || 'SA_2026_MASTER').trim(),
+      role: 'SuperAdmin',
+      action: `ROLE_TERMS_UPDATED_${roleName.toUpperCase()}`,
+      category: 'ADMIN',
+      ipAddress: req.cleanIp,
+      details: { version: updatedTerms.version },
+    }).catch(() => {});
+
+    return res.status(200).json({
+      success: true,
+      message: `${roleName} terms & legal clauses updated live.`,
+      terms: updatedTerms,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.put('/hotline', async (req, res, next) => {
+  try {
+    const { hotlineNumber, isLive } = req.body;
+    const updatedKill = await Kill.findOneAndUpdate(
+      { target: 'HOTLINE_CONFIG' },
+      {
+        $set: {
+          target: 'HOTLINE_CONFIG',
+          active: Boolean(isLive),
+          hotlineConfig: {
+            number: String(hotlineNumber || '').trim(),
+            isLive: Boolean(isLive),
+          },
+        },
+      },
+      { upsert: true, new: true }
+    );
+    if (req.app.get('io')) {
+      req.app.get('io').emit('system:hotlineUpdated', updatedKill.hotlineConfig);
+    }
+
+    await AuditLog.create({
+      user: String(process.env.SUPER_ADMIN_ID || 'SA_2026_MASTER').trim(),
+      role: 'SuperAdmin',
+      action: 'HOTLINE_CONFIG_UPDATED',
+      category: 'ADMIN',
+      ipAddress: req.cleanIp,
+      details: { hotlineNumber, isLive },
+    }).catch(() => {});
+
+    return res.status(200).json({
+      success: true,
+      message: 'Live hotline configuration updated.',
+      hotlineConfig: updatedKill.hotlineConfig,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/legal-notice/:disputeId', async (req, res, next) => {
+  try {
+    const { violationType, noticeText, fineAmount } = req.body;
+    const dispute = await Dispute.findById(req.params.disputeId);
+    if (!dispute) {
+      return res.status(404).json({ success: false, message: 'Dispute record not found.' });
+    }
+
+    dispute.violationType = violationType || dispute.violationType || 'OffPlatformPoaching';
+    dispute.legalNoticeIssued = true;
+    dispute.severity = 'Critical';
+    await dispute.save();
+
+    await AuditLog.create({
+      user: String(process.env.SUPER_ADMIN_ID || 'SA_2026_MASTER').trim(),
+      role: 'SuperAdmin',
+      action: 'LEGAL_VIOLATION_NOTICE_ISSUED',
+      category: 'LEGAL',
+      ipAddress: req.cleanIp,
+      details: { disputeId: dispute._id, violationType, noticeText, fineAmount },
+    }).catch(() => {});
+
+    return res.status(200).json({
+      success: true,
+      message: 'Official legal violation notice issued & logged.',
+      dispute,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.patch('/merchants/:userId/verify', async (req, res, next) => {
+  try {
+    const { approve } = req.body;
+    const merchant = await User.findById(req.params.userId);
+    if (!merchant || merchant.role !== 'Merchant') {
+      return res.status(404).json({ success: false, message: 'Merchant account not found.' });
+    }
+
+    if (approve && !merchant.merchantCommissionAgreed) {
+      return res.status(400).json({
+        success: false,
+        message: 'Cannot activate Merchant without commission agreement consent.',
+      });
+    }
+
+    merchant.accountStatus = approve ? 'Active' : 'Suspended';
+    await merchant.save();
+
+    await AuditLog.create({
+      user: String(process.env.SUPER_ADMIN_ID || 'SA_2026_MASTER').trim(),
+      role: 'SuperAdmin',
+      action: `MERCHANT_${approve ? 'APPROVED' : 'SUSPENDED'}`,
+      category: 'ADMIN',
+      ipAddress: req.cleanIp,
+      details: { merchantId: merchant._id },
+    }).catch(() => {});
+
+    return res.status(200).json({
+      success: true,
+      message: `Merchant account ${approve ? 'verified and activated' : 'suspended'}.`,
+      merchant,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
 router.get('/dashboard', adminController.getDashboardStats || ((req, res) => res.json({ success: true })));
 
 router.post(
@@ -390,7 +673,7 @@ router.get('/status', async (req, res, next) => {
     return res.status(200).json({
       success: true,
       system: {
-        appVersion: 'v3.8.0 ENTERPRISE',
+        appVersion: 'v3.8.0 FINAL',
         replicaStatus: 'Healthy (Primary + Secondary)',
         pitrStatus: 'Active (10m Incremental)',
         selfHealing: 'Online',
@@ -399,6 +682,7 @@ router.get('/status', async (req, res, next) => {
         passwordVerified: true,
         phoneOtp: true,
         gmailOtp: true,
+        transactionPinVerified: true,
       },
       isHidden: Boolean(req.app.locals.systemConfig?.isHidden),
       killTargets,
