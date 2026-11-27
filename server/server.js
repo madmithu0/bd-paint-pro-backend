@@ -31,6 +31,9 @@ const { banIpAuto } = safeRequire('./utils/wafSecurityUtils', { banIpAuto: async
 const { verifyGovtCompliance } = safeRequire('./utils/govtUtils', { verifyGovtCompliance: async () => {} });
 const { verifyHmacSignature } = safeRequire('./utils/signatureUtils', { verifyHmacSignature: () => true });
 const { initSelfHealing } = safeRequire('./infra/selfHealingEngine', { initSelfHealing: () => {} });
+const { initSocketEngine } = safeRequire('./infra/socketEngine', { initSocketEngine: null });
+const { startQualityPenaltyCron } = safeRequire('./services/qualityPenaltyEngine', { startQualityPenaltyCron: () => {} });
+const { startMediaLifecycleCron } = safeRequire('./services/mediaLifecycleManager', { startMediaLifecycleCron: () => {} });
 const healthCheckRouter = safeRequire('./infra/healthCheck', express.Router());
 
 const { verifyToken } = safeRequire('./middleware/authMiddleware', { verifyToken: (req, res, next) => next() });
@@ -60,6 +63,7 @@ if (process.env.APP_VERSION && process.env.APP_VERSION !== APP_VERSION) {
 
 const app = express();
 const server = http.createServer(app);
+
 if (process.env.SENTRY_DSN) {
   Sentry.init({
     dsn: process.env.SENTRY_DSN,
@@ -75,15 +79,18 @@ const io = new Server(server, {
 });
 app.set('io', io);
 
-io.on('connection', (socket) => {
-  socket.on('join_room', (roomId) => {
-    if (roomId) socket.join(roomId);
+if (typeof initSocketEngine === 'function') {
+  initSocketEngine(io);
+} else {
+  io.on('connection', (socket) => {
+    socket.on('join_room', (roomId) => {
+      if (roomId) socket.join(roomId);
+    });
+    socket.on('disconnect', () => {});
   });
-  socket.on('disconnect', () => {});
-});
+}
 
 app.set('trust proxy', 1);
-
 app.locals.systemConfig = {
   version: APP_VERSION,
   lock: ARCHITECTURE_LOCK,
@@ -162,15 +169,16 @@ const superAdminIpGuard = async (req, res, next) => {
   next();
 };
 
-const superAdminRoutes = safeRequire('./routes/super/superAdminRoutes', express.Router());
-app.use(
-  `${API_PREFIX}${SECRET_SUPER_ROUTE}`,
-  superAdminIpGuard,
-  superAdminRoutes
-);
+const superAdminRoutes =
+  safeRequire('./routes/superAdminRoutes') ||
+  safeRequire('./routes/super/superAdminRoutes') ||
+  express.Router();
+
+if (typeof superAdminRoutes === 'function') {
+  app.use(`${API_PREFIX}${SECRET_SUPER_ROUTE}`, superAdminIpGuard, superAdminRoutes);
+}
 
 app.use(API_PREFIX, checkKillSwitch);
-
 const routeRegistry = [
   { path: '/auth', file: './routes/authRoutes', protected: false },
   { path: '/services', file: './routes/serviceCategoryRoutes', protected: false },
@@ -199,49 +207,49 @@ const routeRegistry = [
 ];
 
 routeRegistry.forEach((route) => {
-  const routerInstance = safeRequire(route.file);
-  if (routerInstance) {
-    if (route.protected) {
-      app.use(`${API_PREFIX}${route.path}`, verifyToken, routerInstance);
-    } else {
-      app.use(`${API_PREFIX}${route.path}`, routerInstance);
-    }
+  const routerModule = safeRequire(route.file);
+  if (!routerModule) return;
+
+  if (typeof routerModule !== 'function') {
+    console.warn(`[SAFE-LOADER] Invalid router export skipped (not a function): ${route.file}`);
+    return;
+  }
+
+  if (route.protected) {
+    app.use(`${API_PREFIX}${route.path}`, verifyToken, routerModule);
+  } else {
+    app.use(`${API_PREFIX}${route.path}`, routerModule);
   }
 });
 
-if (process.env.SENTRY_DSN && Sentry.setupExpressErrorHandler) {
-  Sentry.setupExpressErrorHandler(app);
-}
 app.use(notFoundHandler);
 app.use(globalErrorHandler);
 
 const PORT = process.env.PORT || 5000;
-const isPrimaryClusterInstance = !process.env.NODE_APP_INSTANCE || process.env.NODE_APP_INSTANCE === '0';
 
 const startServer = async () => {
   try {
+    paymentConfig.validateConfig();
     await connectDB();
-
-    if (paymentConfig.validateConfig) paymentConfig.validateConfig();
-    if (initSelfHealing) initSelfHealing(server);
-
-    if (isPrimaryClusterInstance) {
-      if (seedDefaultServiceRates) await seedDefaultServiceRates();
-      if (initAutoBackup) initAutoBackup();
-      if (verifyGovtCompliance) await verifyGovtCompliance();
-    }
+    await seedDefaultServiceRates();
+    initAutoBackup();
+    initSelfHealing();
+    startQualityPenaltyCron();
+    startMediaLifecycleCron();
+    await verifyGovtCompliance();
 
     server.listen(PORT, () => {
-      console.log(`[BOOT] Enterprise Server ${APP_VERSION} (${ARCHITECTURE_LOCK}) running on port ${PORT}`);
+      console.log(`[SERVER] Running ${APP_VERSION} (${ARCHITECTURE_LOCK}) on port ${PORT}`);
     });
-  } catch (error) {
-    console.error('[BOOT-FATAL] Server failed to start:', error);
-    process.exit(1);
+  } catch (err) {
+    console.error('[FATAL] Server initialization error:', err.message);
   }
 };
 
+startServer();
+
 const gracefulShutdown = (signal) => {
-  console.log(`[SHUTDOWN] Received ${signal}. Closing server gracefully...`);
+  console.log(`[SHUTDOWN] Received ${signal}. Closing HTTP server gracefully...`);
   server.close(() => {
     console.log('[SHUTDOWN] HTTP server closed.');
     process.exit(0);
@@ -251,4 +259,4 @@ const gracefulShutdown = (signal) => {
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
-startServer();
+module.exports = { app, server, io };
