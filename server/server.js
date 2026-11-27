@@ -22,18 +22,18 @@ const safeRequire = (modulePath, fallback = null) => {
 };
 
 const connectDB = require('./db');
-const paymentConfig = safeRequire('./config/paymentConfig', { validateConfig: () => true });
+const paymentConfig = safeRequire('./config/paymentConfig', {});
 const securityConfig = safeRequire('./config/securityConfig', { helmetOptions: {}, corsOptions: {} });
-const { seedDefaultServiceRates } = safeRequire('./seed/serviceRateSeed', { seedDefaultServiceRates: async () => {} });
+const { seedDefaultServiceRates } = safeRequire('./seed/serviceRateSeed', {});
 
-const { initAutoBackup } = safeRequire('./utils/backupUtils', { initAutoBackup: () => {} });
-const { banIpAuto } = safeRequire('./utils/wafSecurityUtils', { banIpAuto: async () => {} });
-const { verifyGovtCompliance } = safeRequire('./utils/govtUtils', { verifyGovtCompliance: async () => {} });
-const { verifyHmacSignature } = safeRequire('./utils/signatureUtils', { verifyHmacSignature: () => true });
-const { initSelfHealing } = safeRequire('./infra/selfHealingEngine', { initSelfHealing: () => {} });
-const { initSocketEngine } = safeRequire('./infra/socketEngine', { initSocketEngine: null });
-const { startQualityPenaltyCron } = safeRequire('./services/qualityPenaltyEngine', { startQualityPenaltyCron: () => {} });
-const { startMediaLifecycleCron } = safeRequire('./services/mediaLifecycleManager', { startMediaLifecycleCron: () => {} });
+const { initAutoBackup } = safeRequire('./utils/backupUtils', {});
+const { banIpAuto } = safeRequire('./utils/wafSecurityUtils', {});
+const { verifyGovtCompliance } = safeRequire('./utils/govtUtils', {});
+const { verifyHmacSignature } = safeRequire('./utils/signatureUtils', { verifyHmacSignature: (req, res, next) => next() });
+const { initSelfHealing } = safeRequire('./infra/selfHealingEngine', {});
+const { initSocketEngine } = safeRequire('./infra/socketEngine', {});
+const { startQualityPenaltyCron } = safeRequire('./services/qualityPenaltyEngine', {});
+const { startMediaLifecycleCron } = safeRequire('./services/mediaLifecycleManager', {});
 const healthCheckRouter = safeRequire('./infra/healthCheck', express.Router());
 
 const { verifyToken } = safeRequire('./middleware/authMiddleware', { verifyToken: (req, res, next) => next() });
@@ -74,7 +74,7 @@ if (process.env.SENTRY_DSN) {
 }
 
 const io = new Server(server, {
-  cors: securityConfig.corsOptions,
+  cors: securityConfig.corsOptions || { origin: '*' },
   pingTimeout: 60000,
 });
 app.set('io', io);
@@ -110,8 +110,8 @@ app.locals.systemConfig = {
   autoHideEnabled: false,
 };
 
-app.use(helmet(securityConfig.helmetOptions));
-app.use(cors(securityConfig.corsOptions));
+app.use(helmet(securityConfig.helmetOptions || {}));
+app.use(cors(securityConfig.corsOptions || { origin: '*' }));
 app.use(compression());
 app.use(express.json({ limit: '25mb' }));
 app.use(express.urlencoded({ extended: true, limit: '25mb' }));
@@ -160,7 +160,7 @@ const superAdminIpGuard = async (req, res, next) => {
     const attempts = (failedSuperAdminAttempts.get(req.clientIp) || 0) + 1;
     failedSuperAdminAttempts.set(req.clientIp, attempts);
 
-    if (attempts >= 3) {
+    if (attempts >= 3 && typeof banIpAuto === 'function') {
       await banIpAuto(req.clientIp, '3 Failed Unauthorized Super Admin Route Access Attempts');
       failedSuperAdminAttempts.delete(req.clientIp);
     }
@@ -229,14 +229,22 @@ const PORT = process.env.PORT || 5000;
 
 const startServer = async () => {
   try {
-    paymentConfig.validateConfig();
-    await connectDB();
-    await seedDefaultServiceRates();
-    initAutoBackup();
-    initSelfHealing();
-    startQualityPenaltyCron();
-    startMediaLifecycleCron();
-    await verifyGovtCompliance();
+    if (paymentConfig && typeof paymentConfig.validateConfig === 'function') {
+      paymentConfig.validateConfig();
+    }
+    if (typeof connectDB === 'function') {
+      await connectDB();
+    }
+    if (typeof seedDefaultServiceRates === 'function') {
+      await seedDefaultServiceRates();
+    }
+    if (typeof initAutoBackup === 'function') initAutoBackup();
+    if (typeof initSelfHealing === 'function') initSelfHealing();
+    if (typeof startQualityPenaltyCron === 'function') startQualityPenaltyCron();
+    if (typeof startMediaLifecycleCron === 'function') startMediaLifecycleCron();
+    if (typeof verifyGovtCompliance === 'function') {
+      await verifyGovtCompliance();
+    }
 
     server.listen(PORT, () => {
       console.log(`[SERVER] Running ${APP_VERSION} (${ARCHITECTURE_LOCK}) on port ${PORT}`);
