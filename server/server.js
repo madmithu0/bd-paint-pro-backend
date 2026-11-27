@@ -253,6 +253,27 @@ const startServer = async () => {
     console.error('[FATAL] Server initialization error:', err.message);
   }
 };
+const startServer = () => {
+  server.listen(PORT, () => {
+    console.log(`[SERVER] Running ${APP_VERSION} (${ARCHITECTURE_LOCK}) on port ${PORT}`);
+  });
+
+  if (paymentConfig && typeof paymentConfig.validateConfig === 'function') {
+    paymentConfig.validateConfig();
+  }
+  if (typeof connectDB === 'function') {
+    connectDB()
+      .then(async () => {
+        if (typeof seedDefaultServiceRates === 'function') await seedDefaultServiceRates();
+        if (typeof initAutoBackup === 'function') initAutoBackup();
+        if (typeof initSelfHealing === 'function') initSelfHealing();
+        if (typeof startQualityPenaltyCron === 'function') startQualityPenaltyCron();
+        if (typeof startMediaLifecycleCron === 'function') startMediaLifecycleCron();
+        if (typeof verifyGovtCompliance === 'function') await verifyGovtCompliance();
+      })
+      .catch((err) => console.error('[DB-INIT] Background DB connection warning:', err.message));
+  }
+};
 
 startServer();
 
