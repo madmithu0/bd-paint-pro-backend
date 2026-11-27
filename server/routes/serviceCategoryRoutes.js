@@ -1,4 +1,3 @@
-
 const express = require('express');
 const mongoose = require('mongoose');
 const ServiceCategory = require('../models/ServiceCategory');
@@ -6,11 +5,6 @@ const User = require('../models/User');
 const AuditLog = require('../models/AuditLog');
 const { verifyToken } = require('../middleware/authMiddleware');
 const { superAdminGate } = require('../middleware/adminMiddleware');
-
-console.log('CHECK MIDDLEWARE:', {
-  verifyToken: typeof verifyToken,
-  superAdminGate: typeof superAdminGate,
-});
 
 const router = express.Router();
 
@@ -99,8 +93,7 @@ router.post('/estimate', async (req, res, next) => {
           message: `With-material option is disabled for ${cat.name}`,
         });
       }
-
-      const est = cat.calculateEstimate(item.sqft, isMistriOnly);
+      const est = cat.calculateEstimate(item.sqft, isMistriOnly, item.coatCount);
       totalSqft += est.sqft;
       totalSlots += est.calculatedSlots;
       totalBill += est.subTotal;
@@ -130,6 +123,7 @@ router.post('/estimate', async (req, res, next) => {
     next(error);
   }
 });
+
 router.patch('/mistri/skills', verifyToken, async (req, res, next) => {
   try {
     if (req.user.role !== 'Mistri') {
@@ -156,7 +150,7 @@ router.patch('/mistri/skills', verifyToken, async (req, res, next) => {
     }).select('_id');
 
     const approvedIds = activeServices.map((s) => s._id);
-    await User.findByIdAndUpdate(req.user.id, {
+    await User.findByIdAndUpdate(req.user.id || req.user._id, {
       $set: { capableServices: approvedIds },
     });
 
@@ -178,16 +172,21 @@ router.patch(
     try {
       const {
         name,
+        nameBn,
+        nameEn,
         applicationArea,
+        specialtyArea,
         slotSqftPerDay,
+        defaultCoats,
+        perCoatRateMultiplier,
         labourRatePerSqft,
         withMaterialRatePerSqft,
+        availableBrands,
         isActive,
         isLabourOnlyEnabled,
         isWithMaterialEnabled,
         disabledReason,
       } = req.body;
-
       const service = await ServiceCategory.findById(req.params.id);
       if (!service) {
         return res.status(404).json({
@@ -197,20 +196,26 @@ router.patch(
       }
 
       if (name !== undefined) service.name = name;
+      if (nameBn !== undefined) service.nameBn = nameBn;
+      if (nameEn !== undefined) service.nameEn = nameEn;
       if (applicationArea !== undefined) service.applicationArea = applicationArea;
+      if (specialtyArea !== undefined) service.specialtyArea = specialtyArea;
       if (slotSqftPerDay !== undefined) service.slotSqftPerDay = Number(slotSqftPerDay);
+      if (defaultCoats !== undefined) service.defaultCoats = Number(defaultCoats);
+      if (perCoatRateMultiplier !== undefined) service.perCoatRateMultiplier = Number(perCoatRateMultiplier);
       if (labourRatePerSqft !== undefined) service.labourRatePerSqft = Number(labourRatePerSqft);
       if (withMaterialRatePerSqft !== undefined) service.withMaterialRatePerSqft = Number(withMaterialRatePerSqft);
+      if (Array.isArray(availableBrands)) service.availableBrands = availableBrands;
       if (typeof isActive === 'boolean') service.isActive = isActive;
       if (typeof isLabourOnlyEnabled === 'boolean') service.isLabourOnlyEnabled = isLabourOnlyEnabled;
       if (typeof isWithMaterialEnabled === 'boolean') service.isWithMaterialEnabled = isWithMaterialEnabled;
       if (disabledReason !== undefined) service.disabledReason = disabledReason;
-      service.updatedBy = req.user.id;
+      service.updatedBy = req.user.id || req.user._id;
 
       await service.save();
 
       await AuditLog.create({
-        user: req.user.id,
+        user: req.user.id || req.user._id,
         action: `SUPER_ADMIN_SERVICE_UPDATE:${service.code}`,
         ip: req.ip,
       }).catch(() => {});
@@ -232,7 +237,7 @@ router.post('/super/create', verifyToken, superAdminGate, async (req, res, next)
   try {
     const newService = await ServiceCategory.create({
       ...req.body,
-      updatedBy: req.user.id,
+      updatedBy: req.user.id || req.user._id,
     });
 
     emitServiceUpdate(req, { action: 'CREATED', service: newService });
