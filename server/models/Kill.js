@@ -11,7 +11,7 @@ const killSchema = new mongoose.Schema(
   {
     killType: {
       type: String,
-      enum: ['FEATURE', 'USER', 'VERSION', 'GOVT'],
+      enum: ['FEATURE', 'USER', 'VERSION', 'GOVT', 'MISTRI_SIGNUP'],
       required: true,
     },
     target: {
@@ -30,13 +30,23 @@ const killSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+    // New Mistri Signup & Area Quota Controls (v3.8.1)
+    newMistriSignupEnabled: {
+      type: Boolean,
+      default: true,
+    },
+    maxMistriPerUpazila: {
+      type: Number,
+      default: 0, // 0 means unlimited; set > 0 (e.g., 50) to enforce Upazila quota
+      min: 0,
+    },
     govtFeatureFlags: {
       autoVatEnabled: { type: Boolean, default: false },
       nbrBinMandateEnabled: { type: Boolean, default: false },
       govtAuditEnabled: { type: Boolean, default: false },
     },
     hotlineConfig: {
-      number: { type: String, default: process.env.HOTLINE_NUMBER || '096XXXXXXXX' },
+      number: { type: String, default: process.env.HOTLINE_NUMBER || '01885165203},
       isLive: { type: Boolean, default: true },
     },
     auditHistory: [
