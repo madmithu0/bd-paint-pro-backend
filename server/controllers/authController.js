@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const User = require('../models/User');
 const OTP = require('../models/OTP');
+const Kill = require('../models/Kill');
 const securityConfig = require('../config/securityConfig');
 const { generateTokenPair, verifyRefreshToken } = require('../utils/tokenUtils');
 const { verifyFirebasePhoneToken } = require('../utils/smsUtils');
@@ -56,6 +57,46 @@ const signup = async (req, res, next) => {
 
     if (!ALLOWED_ROLES.includes(role)) {
       return res.status(403).json({ success: false, message: 'Invalid role selected.' });
+    }
+
+    if (role === 'Mistri') {
+      const mistriControl = await Kill.findOne({ target: 'MISTRI_SIGNUP_CONTROL' }).lean();
+
+      if (mistriControl && mistriControl.newMistriSignupEnabled === false) {
+        return res.status(403).json({
+          success: false,
+          code: 'MISTRI_SIGNUP_PAUSED',
+          message: 'New Mistri registration is temporarily paused. Please try again later.',
+        });
+      }
+
+      const maxQuota = Number(mistriControl?.maxMistriPerUpazila) || 0;
+      if (maxQuota > 0) {
+        const cleanDistrict = String(district || '').trim();
+        const cleanUpazila = String(upazila || '').trim();
+
+        if (!cleanDistrict || !cleanUpazila) {
+          return res.status(400).json({
+            success: false,
+            code: 'LOCATION_REQUIRED_FOR_QUOTA',
+            message: 'District and Upazila are required for Mistri registration.',
+          });
+        }
+
+        const existingMistriCount = await User.countDocuments({
+          role: 'Mistri',
+          district: { $regex: new RegExp(`^${cleanDistrict.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') },
+          upazila: { $regex: new RegExp(`^${cleanUpazila.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') },
+          accountStatus: { $nin: ['Banned', 'Suspended'] },
+        });
+        if (existingMistriCount >= maxQuota) {
+          return res.status(403).json({
+            success: false,
+            code: 'UPAZILA_MISTRI_QUOTA_FULL',
+            message: `Mistri registration quota (${maxQuota}) for ${cleanUpazila} Upazila is currently full.`,
+          });
+        }
+      }
     }
 
     const pwdError = validatePasswordStrength(password);
@@ -219,7 +260,6 @@ const sendOtp = async (req, res, next) => {
     if (!email && !phone) {
       return res.status(400).json({ success: false, message: 'Email or phone number is required to send OTP.' });
     }
-
     if (email) {
       const cleanEmail = String(email).trim().toLowerCase();
       const otpCode = generateSixDigitOtp();
@@ -256,6 +296,7 @@ const sendOtp = async (req, res, next) => {
     next(error);
   }
 };
+
 const verifyOtp = async (req, res, next) => {
   try {
     const { email, phone, code, firebaseIdToken, purpose = 'LOGIN' } = req.body;
@@ -334,186 +375,4 @@ const verifyOtp = async (req, res, next) => {
   } catch (error) {
     next(error);
   }
-};
-
-const forgotPassword = async (req, res, next) => {
-  try {
-    const { identifier, email, phone } = req.body;
-    const target = identifier || email || phone;
-
-    if (!target) {
-      return res.status(400).json({ success: false, message: 'Email or phone number is required.' });
-    }
-
-    const isEmail = String(target).includes('@');
-    const user = await User.findOne(
-      isEmail ? { email: String(target).trim().toLowerCase() } : { phone: String(target).trim() }
-    );
-
-    if (!user) {
-      return res.status(404).json({ success: false, message: 'No account found with this email or phone.' });
-    }
-    if (isEmail) {
-      const otpCode = generateSixDigitOtp();
-      await OTP.deleteMany({ email: user.email, purpose: { $in: ['FORGOT_PASSWORD', 'PASSWORD_RESET'] } });
-      await OTP.create({
-        email: user.email,
-        code: otpCode,
-        provider: 'GMAIL_SMTP',
-        purpose: 'PASSWORD_RESET',
-      });
-
-      await sendUserGmailOtp({ email: user.email, otpCode, purpose: 'Password Reset' });
-
-      return res.status(200).json({
-        success: true,
-        provider: 'GMAIL_SMTP',
-        message: 'Password reset OTP sent to your Gmail.',
-      });
-    }
-
-    return res.status(200).json({
-      success: true,
-      provider: 'FIREBASE_PHONE',
-      useFirebase: true,
-      formattedPhone: normalizeBdPhone(user.phone),
-      message: 'Verify your phone via Firebase OTP to reset password.',
-    });
-  } catch (error) {
-    next(error);
-  }
-};
-
-const resetPassword = async (req, res, next) => {
-  try {
-    const { email, phone, code, firebaseIdToken, newPassword } = req.body;
-
-    const pwdError = validatePasswordStrength(newPassword);
-    if (pwdError) {
-      return res.status(400).json({ success: false, message: pwdError });
-    }
-
-    let user = null;
-
-    if (firebaseIdToken) {
-      const fbVerified = await verifyFirebasePhoneToken(firebaseIdToken);
-      const localPhone = fbVerified.phone.replace(/^\+88/, '');
-      user = await User.findOne({
-        phone: { $in: [fbVerified.phone, localPhone, phone].filter(Boolean) },
-      }).select('+passwordHash +passwordHistory');
-    } else if (email && code) {
-      const cleanEmail = String(email).trim().toLowerCase();
-      const otpRecord = await OTP.findOne({
-        email: cleanEmail,
-        purpose: { $in: ['FORGOT_PASSWORD', 'PASSWORD_RESET'] },
-        code: String(code).trim(),
-        verified: false,
-      }).sort({ createdAt: -1 });
-
-      if (!otpRecord) {
-        return res.status(400).json({ success: false, message: 'Invalid or expired reset OTP.' });
-      }
-
-      otpRecord.verified = true;
-      await otpRecord.save();
-      user = await User.findOne({ email: cleanEmail }).select('+passwordHash +passwordHistory');
-    } else {
-      return res.status(400).json({ success: false, message: 'Provide (email + code) or firebaseIdToken.' });
-    }
-
-    if (!user) {
-      return res.status(404).json({ success: false, message: 'User account not found.' });
-    }
-
-    const isSameOld = await user.comparePassword(newPassword);
-    if (isSameOld) {
-      return res.status(400).json({ success: false, message: 'New password must be different from your previous password.' });
-    }
-
-    if (user.passwordHash) {
-      user.passwordHistory = [user.passwordHash, ...(user.passwordHistory || [])].slice(0, 3);
-    }
-    user.passwordHash = newPassword;
-    user.failedLoginAttempts = 0;
-    user.lockUntil = null;
-    await user.save();
-
-    res.status(200).json({
-      success: true,
-      message: 'Password reset successful. Please login with your new password.',
-    });
-  } catch (error) {
-    next(error);
-  }
-};
-const acceptRoleTerms = async (req, res, next) => {
-  try {
-    const { termsAccepted = true, merchantCommissionAgreed = false } = req.body;
-    const user = await User.findById(req.user.id);
-    if (!user) {
-      return res.status(404).json({ success: false, message: 'User not found.' });
-    }
-
-    const termsCheck = validateRoleTermsAcceptance({
-      role: user.role,
-      termsAccepted,
-      merchantCommissionAgreed,
-    });
-    if (!termsCheck.valid) {
-      return res.status(400).json({ success: false, code: termsCheck.code, message: termsCheck.message });
-    }
-
-    user.termsAcceptedVersion = termsCheck.roleVersion;
-    if (user.role === 'Merchant') {
-      user.merchantCommissionAgreed = true;
-    }
-    await user.save();
-
-    await recordUserTermsAcceptance({
-      userId: user._id,
-      role: user.role,
-      merchantCommissionAgreed: user.merchantCommissionAgreed,
-      ipAddress: req.clientIp || req.ip,
-      deviceInfo: req.headers['user-agent'],
-    }).catch(() => {});
-
-    res.status(200).json({
-      success: true,
-      message: 'Role-specific Terms & Conditions accepted.',
-      termsAcceptedVersion: user.termsAcceptedVersion,
-      merchantCommissionAgreed: user.merchantCommissionAgreed,
-    });
-  } catch (error) {
-    next(error);
-  }
-};
-
-const refreshToken = async (req, res) => {
-  try {
-    const token = req.body.refreshToken || req.headers['x-refresh-token'];
-    if (!token) {
-      return res.status(401).json({ success: false, message: 'Refresh token required.' });
-    }
-
-    const decoded = verifyRefreshToken(token);
-    const tokens = generateTokenPair({ id: decoded.id, role: decoded.role });
-
-    res.status(200).json({
-      success: true,
-      ...tokens,
-    });
-  } catch (error) {
-    return res.status(401).json({ success: false, message: 'Invalid or expired refresh token.' });
-  }
-};
-
-module.exports = {
-  signup,
-  login,
-  sendOtp,
-  verifyOtp,
-  forgotPassword,
-  resetPassword,
-  acceptRoleTerms,
-  refreshToken,
 };
