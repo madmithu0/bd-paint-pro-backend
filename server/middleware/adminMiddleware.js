@@ -19,6 +19,7 @@ const superAdminGate = async (req, res, next) => {
   try {
     const openVerifyPaths = [
       '/login',
+      '/login-password',
       '/send-otps',
       '/verify-2fa',
       '/verify-4-layer',
@@ -30,18 +31,30 @@ const superAdminGate = async (req, res, next) => {
     }
 
     const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    const headerToken = req.headers['x-super-token'];
+    let token = '';
+
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      token = authHeader.split(' ')[1];
+    } else if (headerToken) {
+      token = String(headerToken).trim();
+    }
+
+    if (!token) {
       return res.status(401).json({
         success: false,
         message: 'Super Admin Password + 2FA Session Token required.',
       });
     }
 
-    const token = authHeader.split(' ');
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
-    const configuredAdminId = (process.env.SUPER_ADMIN_ID || '').trim();
-    const hasPasswordAuth = decoded.passwordVerified === true || decoded.superAdminVerified === true;
+    const configuredAdminId = (process.env.SUPER_ADMIN_ID || 'SA_2026_MASTER').trim();
+    const hasPasswordAuth =
+      decoded.passwordVerified === true ||
+      decoded.superAdminVerified === true ||
+      decoded.layers?.passwordVerified === true;
+
     const has2FA =
       decoded.twoFactorVerified === true ||
       decoded.layers?.phoneOtp === true ||
