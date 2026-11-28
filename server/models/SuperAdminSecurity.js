@@ -23,6 +23,20 @@ const superAdminSecuritySchema = new mongoose.Schema(
       type: Date,
       default: Date.now,
     },
+    allowedIps: {
+      type: [String],
+      default: [],
+    },
+    sessionTimeoutMinutes: {
+      type: Number,
+      default: 30,
+      min: 5,
+      max: 240,
+    },
+    twoFactorEnabled: {
+      type: Boolean,
+      default: true,
+    },
     failedAttempts: {
       type: Number,
       default: 0,
